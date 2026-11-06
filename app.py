@@ -410,7 +410,11 @@ def admin():
     visitors = load_json('visitors.json')
     links = load_json('links.json')
     total_victims = len(visitors)
-    total_photos = sum(v.get('photos', 0) for v in visitors.values())
+    total_photos = sum(
+    visitor.get('photos', 0)
+    for visitor in visitors
+    if isinstance(visitor, dict)
+    )
 
     return render_template_string(ADMIN_DASHBOARD,
                                   visitors=visitors,
