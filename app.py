@@ -19,7 +19,17 @@ os.makedirs('photos', exist_ok=True)
 for fname in ['visitors.json', 'links.json']:
     if not os.path.exists(fname):
         with open(fname, 'w') as f:
-            json.dump([], f) if fname == 'visitors.json' else json.dump({}, f)
+            json.dump({}, f)          # both files must be dicts
+    else:
+        # migrate an old list-formatted visitors.json to dict form
+        with open(fname, 'r') as f:
+            try:
+                data = json.load(f)
+            except Exception:
+                data = {}
+        if not isinstance(data, dict):
+            with open(fname, 'w') as f:
+                json.dump({}, f)
 
 # ---------- Helper Functions ----------
 def load_json(fname):
