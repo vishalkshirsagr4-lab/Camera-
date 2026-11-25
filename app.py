@@ -1,5 +1,8 @@
 import os
+import sys
+import time
 import threading
+import traceback
 from flask import Flask
 
 from config import config
@@ -11,7 +14,6 @@ def create_app():
     app = Flask(__name__)
     app.secret_key = config['secret_key']
     app.logger.setLevel('INFO')
-
     boot()
     register_blueprints(app)
     return app
@@ -19,23 +21,31 @@ def create_app():
 
 app = create_app()
 
+_poller_started = False
+
 
 def _start_poller():
-    """Runs the Telegram long-polling loop in a background thread."""
-    from polling import run_polling
-    import time
-    time.sleep(2)          # let Flask bind its port first
+    global _poller_started
+    if _poller_started:
+        return
+    _poller_started = True
+    time.sleep(2)
+    print(f"[poller] thread alive, pid={os.getpid()}", flush=True)
     try:
+        from polling import run_polling
         run_polling()
-    except Exception as e:
-        app.logger.exception(f"Poller crashed: {e}")
+    except Exception:
+        print("[poller] CRASHED:", flush=True)
+        traceback.print_exc()
+        sys.stderr.flush()
 
 
-# Start poller ONCE at import time (works under python app.py AND gunicorn -w 1)
 if os.environ.get('DISABLE_POLLER') != '1':
-    threading.Thread(target=_start_poller, daemon=True).start()
+    print(f"[app] spawning poller thread (pid={os.getpid()})", flush=True)
+    threading.Thread(target=_start_poller, daemon=True, name="tg-poller").start()
 
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    port = int(os.environ.get('PORT', 10000))
+    print(f"[app] starting Flask on port {port}", flush=True)
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
