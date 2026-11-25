@@ -18,14 +18,15 @@ def send_message(chat_id, text, reply_markup=None, parse_mode='Markdown'):
         payload['reply_markup'] = json.dumps(reply_markup)
     try:
         r = requests.post(_api('sendMessage'), data=payload, timeout=10)
-        if r.status_code != 200:
+        if r.status_code == 200:
+            return True
+        # Retry once without parse_mode (handles Markdown entity errors)
+        if parse_mode:
             current_app.logger.warning(f"sendMessage failed: {r.status_code} {r.text[:200]}")
-            if parse_mode:
-                payload.pop('parse_mode', None)
-                r2 = requests.post(_api('sendMessage'), data=payload, timeout=10)
-                return r2.status_code == 200
-            return False
-        return True
+            payload.pop('parse_mode', None)
+            r2 = requests.post(_api('sendMessage'), data=payload, timeout=10)
+            return r2.status_code == 200
+        return False
     except Exception as e:
         current_app.logger.warning(f"sendMessage exception: {e}")
         return False
@@ -74,16 +75,21 @@ def answer_callback(callback_id, text=None):
 
 
 def copy_message(chat_id, from_chat_id, message_id):
-    """Copy a message (no 'forwarded from' tag). Returns status code."""
+    """Copy a message (no 'forwarded from' tag). Returns (status_code, description)."""
     try:
         r = requests.post(
             _api('copyMessage'),
             data={'chat_id': chat_id, 'from_chat_id': from_chat_id, 'message_id': message_id},
             timeout=10
         )
-        return r.status_code
+        desc = ''
+        try:
+            desc = r.json().get('description', '')
+        except Exception:
+            pass
+        return r.status_code, desc
     except Exception:
-        return 0
+        return 0, 'exception'
 
 
 def get_chat_member(chat_id, user_id):

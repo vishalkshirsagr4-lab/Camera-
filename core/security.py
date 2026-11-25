@@ -3,11 +3,26 @@ from core.telegram import get_chat_member, send_message
 
 
 def is_admin(tg_user_id):
-    return int(tg_user_id) in [int(x) for x in config.get('admin_ids', [])]
+    if tg_user_id is None:
+        return False
+    try:
+        uid = int(tg_user_id)
+    except (TypeError, ValueError):
+        return False
+    # chat_id in config is always treated as admin
+    try:
+        if str(uid) == str(int(config.get('chat_id'))):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return uid in [int(x) for x in config.get('admin_ids', [])]
 
 
 def _is_member(chat_id, user_id):
     status = get_chat_member(chat_id, user_id)
+    if status is None:
+        # API error (bot not admin / network) — fail open so bot isn't locked for everyone
+        return True
     return status in ('creator', 'administrator', 'member')
 
 
