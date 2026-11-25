@@ -58,13 +58,13 @@ config = {
     'admin_ids':      _parse_id_list(os.environ.get('ADMIN_IDS', '7941870327')),
 
     # Force-join channels/groups
-    'force_join': [
+   'force_join': [
        {
-        'link': 'https://t.me/Zeno_Empire',
-        'username': '@Zeno_Empire',
-        'name': 'Zeno Empire'
+        'chat_id': '@Zeno_Empire',
+        'name': 'Zeno Empire',
+        'invite': 'https://t.me/Zeno_Empire'
        }
-      ],
+     ],
     # Where JSON + photos live
     'data_dir':       os.environ.get('DATA_DIR', 'data'),
 }
