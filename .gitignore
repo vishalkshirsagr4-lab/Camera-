@@ -1,1 +1,10 @@
+__pycache__/
+*.pyc
 .env
+config.py
+data/
+photos/
+*.json
+*.log
+venv/
+.venv/
