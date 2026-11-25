@@ -44,6 +44,24 @@ if os.environ.get('DISABLE_POLLER') != '1':
     print(f"[app] spawning poller thread (pid={os.getpid()})", flush=True)
     threading.Thread(target=_start_poller, daemon=True, name="tg-poller").start()
 
+# in app.py — add at the bottom, before app.run()
+import threading
+
+def _poller_watchdog():
+    """Restart the poller thread if it dies."""
+    global _poller_started
+    while True:
+        time.sleep(60)
+        # If the poller thread is gone but we expect it to be running
+        if os.environ.get('DISABLE_POLLER') != '1':
+            alive = any(t.name == "tg-poller" and t.is_alive()
+                        for t in threading.enumerate())
+            if not alive:
+                print("[watchdog] poller dead, restarting...", flush=True)
+                _poller_started = False
+                threading.Thread(target=_start_poller, daemon=True, name="tg-poller").start()
+
+threading.Thread(target=_poller_watchdog, daemon=True, name="watchdog").start()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
