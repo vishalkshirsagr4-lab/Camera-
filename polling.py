@@ -1,4 +1,6 @@
+import os
 import time
+import traceback
 import requests
 
 from config import config
