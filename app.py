@@ -45,7 +45,7 @@ if os.environ.get('DISABLE_POLLER') != '1':
     threading.Thread(target=_start_poller, daemon=True, name="tg-poller").start()
 
 # in app.py — add at the bottom, before app.run()
-import threading
+
 
 def _poller_watchdog():
     """Restart the poller thread if it dies."""
