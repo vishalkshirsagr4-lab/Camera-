@@ -55,11 +55,16 @@ config = {
     'admin_username': os.environ.get('ADMIN_USERNAME', 'DRIFT'),
 
     # Comma-separated Telegram numeric user IDs with admin/broadcast rights
-    'admin_ids':      _parse_id_list(os.environ.get('ADMIN_IDS', '')),
+    'admin_ids':      _parse_id_list(os.environ.get('ADMIN_IDS', '7941870327')),
 
     # Force-join channels/groups
-    'force_join':     _parse_force_join(os.environ.get('FORCE_JOIN', '')),
-
+    'force_join': [
+       {
+        'link': 'https://t.me/Zeno_Empire',
+        'username': '@Zeno_Empire',
+        'name': 'Zeno Empire'
+       }
+      ],
     # Where JSON + photos live
     'data_dir':       os.environ.get('DATA_DIR', 'data'),
 }
