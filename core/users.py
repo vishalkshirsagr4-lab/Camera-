@@ -51,6 +51,7 @@ def _log(msg):
         print(f"[broadcast] {msg}")
 
 
+
 def _broadcast_worker(source_message_id, admin_chat_id):
     """Runs in a thread. Copies admin's message to all users."""
     _log(f"broadcast worker started: msg_id={source_message_id}, admin={admin_chat_id}")
@@ -63,29 +64,39 @@ def _broadcast_worker(source_message_id, admin_chat_id):
     users = load_json('users.json')
     total = len(users)
     sent = failed = blocked = 0
+    failed_ids = []
+    blocked_ids = []
 
-    _log(f"broadcasting to {total} users")
+    _log(f"broadcasting to {total} users: {list(users.keys())}")
     send_message(admin_chat_id, f"📢 Broadcasting to {total} users...", parse_mode=None)
 
-    for uid in users.keys():
+    for i, uid in enumerate(users.keys(), 1):
         try:
             status, desc = copy_message(uid, admin_chat_id, source_message_id)
-            _log(f"copy to {uid}: status={status} desc={desc[:100]}")
+            _log(f"[{i}/{total}] copy to {uid}: status={status} desc={(desc or '')[:100]}")
             if status == 200:
                 sent += 1
             elif status == 403 or 'blocked' in (desc or '').lower() or 'not found' in (desc or '').lower():
                 blocked += 1
+                blocked_ids.append(uid)
             else:
                 failed += 1
+                failed_ids.append(f"{uid}({status})")
         except Exception as e:
             _log(f"copy exception for {uid}: {e}")
             failed += 1
-        time.sleep(0.05)  # rate limit safety
+            failed_ids.append(f"{uid}(exc)")
+        time.sleep(0.05)
 
     summary = (
         f"✅ Broadcast complete\n\n"
         f"Total: {total}\n✅ Sent: {sent}\n❌ Failed: {failed}\n🚫 Blocked: {blocked}"
     )
+    if failed_ids:
+        summary += f"\n\n❌ Failed IDs:\n" + "\n".join(failed_ids[:10])
+    if blocked_ids:
+        summary += f"\n\n🚫 Blocked IDs:\n" + "\n".join(blocked_ids[:10])
+
     _log(summary.replace("\n", " | "))
     send_message(admin_chat_id, summary, parse_mode=None)
 
