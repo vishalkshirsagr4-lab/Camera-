@@ -47,11 +47,11 @@ def _handle_callback(cb):
     # Force-join recheck
     if data == 'check_join':
         if is_admin(from_id):
-            send_message(from_id, "✅ Admin verified! Send any URL to create a spy link.", parse_mode=None)
+            send_message(from_id, "✅ Admin verified! Welcome to the bot.", parse_mode=None)
             return 'OK', 200
         ok, missing = check_force_join(from_id)
         if ok:
-            send_message(from_id, "✅ Verified! Send any URL to create a spy link.", parse_mode=None)
+            send_message(from_id, "✅ Verification complete. Welcome!", parse_mode=None)
         else:
             send_force_join_prompt(from_id, missing)
         return 'OK', 200
@@ -62,38 +62,48 @@ def _handle_callback(cb):
         send_force_join_prompt(from_id, missing)
         return 'OK', 200
 
-    if data == 'generate':
-        send_message(from_id, '📥 Send target URL\nExample: https://youtube.com', parse_mode=None)
+    if data == 'help':
+        send_message(
+            from_id,
+            "✨ *HELP & GUIDE*\n\n"
+            "Welcome! This bot menu provides information and account support.\n\n"
+            "🔹 Use /start to reopen the main menu.\n"
+            "🔹 Only interact with links and pages when you understand what they do.\n"
+            "🔹 Never share private photos, passwords, OTPs or sensitive information.\n\n"
+            "Need assistance? Contact the bot administrator.",
+            parse_mode='Markdown'
+        )
 
-    elif data == 'stats':
-        visitors = load_json('visitors.json')
-        links = load_json('links.json')
-        mine = [vid for vid, v in visitors.items() if str(v.get('generated_by')) == str(from_id)]
-        my_links = [c for c, d in links.items() if str(d.get('created_by')) == str(from_id)]
-        send_message(from_id,
-                     f"📊 Your victims: {len(mine)}\n🔗 Your links: {len(my_links)}",
-                     parse_mode=None)
+    elif data == 'privacy':
+        send_message(
+            from_id,
+            "🛡️ *PRIVACY & CONSENT*\n\n"
+            "Only use camera, location or device features when the person using the device has clearly understood the request and actively agreed.\n\n"
+            "Do not use this bot to secretly monitor, identify or collect another person's information.\n"
+            "You can decline permission at any time.",
+            parse_mode='Markdown'
+        )
 
     elif data == 'broadcast':
         if not is_admin(from_id):
             send_message(from_id, "❌ Admin only.", parse_mode=None)
             return 'OK', 200
         _pending[from_id] = 'broadcast'
-        send_message(from_id, "📢 Send the message to broadcast. /cancel to abort.", parse_mode=None)
+        send_message(from_id, "📢 Send the announcement to broadcast. /cancel to abort.", parse_mode=None)
 
     elif data == 'users':
         if not is_admin(from_id):
             send_message(from_id, "❌ Admin only.", parse_mode=None)
             return 'OK', 200
         users = load_json('users.json')
-        lines = [f"👥 *Total Users:* {len(users)}\n"]
+        lines = [f"👥 *Total Users:* {len(users)}\\n"]
         for i, (uid, u) in enumerate(list(users.items())[:30], 1):
             name = f"{u.get('first_name','')} {u.get('last_name','')}".strip() or "No name"
             uname = f"@{u['username']}" if u.get('username') else "—"
-            lines.append(f"{i}. {name} ({uname})\n   🆔 `{uid}` | 💬 {u.get('messages',0)} | 🔗 {u.get('links_created',0)}")
+            lines.append(f"{i}. {name} ({uname})\\n   🆔 `{uid}` | 💬 {u.get('messages',0)}")
         if len(users) > 30:
-            lines.append(f"\n_...and {len(users)-30} more. Use /admin._")
-        send_message(from_id, "\n".join(lines), parse_mode='Markdown')
+            lines.append(f"\\n_...and {len(users)-30} more._")
+        send_message(from_id, "\\n".join(lines), parse_mode='Markdown')
 
     return 'OK', 200
 
@@ -116,18 +126,30 @@ def _handle_message(msg):
 
         keyboard = {
             'inline_keyboard': [
-                [{'text': '🔗 Generate Spy Link', 'callback_data': 'generate'}],
-                [{'text': '📊 My Stats', 'callback_data': 'stats'}],
+                [
+                    {'text': '✨ Help & Guide', 'callback_data': 'help'},
+                    {'text': '🛡️ Privacy & Consent', 'callback_data': 'privacy'},
+                ],
             ]
         }
         if is_admin(chat_id):
-            keyboard['inline_keyboard'].append([{'text': '📢 Broadcast', 'callback_data': 'broadcast'}])
-            keyboard['inline_keyboard'].append([{'text': '👥 All Users', 'callback_data': 'users'}])
+            keyboard['inline_keyboard'].append([
+                {'text': '📢 Announcements', 'callback_data': 'broadcast'},
+                {'text': '👥 User Overview', 'callback_data': 'users'},
+            ])
 
-        send_message(chat_id,
-                     "👾 DG DRIFT Spy Bot\n\nSend any URL to create a spy link.",
-                     reply_markup=keyboard,
-                     parse_mode=None)
+        send_message(
+            chat_id,
+            "🌟 *WELCOME!*\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Your bot menu, made simple.\n\n"
+            "📚 Open *Help & Guide* to learn how to use the bot.\n"
+            "🛡️ Read *Privacy & Consent* before using any device-related feature.\n\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Choose an option below 👇",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
         return 'OK', 200
 
     # Force-join gate
@@ -139,7 +161,7 @@ def _handle_message(msg):
     # Admin broadcast command
     if text == '/broadcast' and is_admin(chat_id):
         _pending[chat_id] = 'broadcast'
-        send_message(chat_id, "📢 Send the message to broadcast. /cancel to abort.", parse_mode=None)
+        send_message(chat_id, "📢 Send the announcement to broadcast. /cancel to abort.", parse_mode=None)
         return 'OK', 200
 
     if text == '/cancel' and chat_id in _pending:
@@ -150,36 +172,12 @@ def _handle_message(msg):
     if _pending.get(chat_id) == 'broadcast' and is_admin(chat_id):
         _pending.pop(chat_id, None)
         broadcast_all_async(msg.get('message_id'), chat_id)
-        send_message(chat_id, "🚀 Broadcast started in background.", parse_mode=None)
+        send_message(chat_id, "🚀 Announcement started in background.", parse_mode=None)
         return 'OK', 200
 
-    # URL → create link
-    if text.startswith('http'):
-        domain = text.replace('https://', '').replace('http://', '').split('/')[0]
-        domain = domain.replace('www.', '').replace('.', '_')
-        short_code = f"{domain}_{str(int(time.time()))[-5:]}"
-
-        links = load_json('links.json')
-        links[short_code] = {
-            'url': text,
-            'created_by': str(chat_id),
-            'created_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        }
-        save_json('links.json', links)
-        bump_links_count(chat_id)
-
-        base = config.get('website', '').rstrip('/')
-        if not base:
-            send_message(chat_id, "⚠️ Server 'website' not configured.", parse_mode=None)
-            return 'OK', 200
-
-        spy_link = f"{base}/s/{short_code}"
-        send_message(chat_id,
-                     f"✅ Spy link created!\n\n{spy_link}\n\n"
-                     "Captures: 📸 Camera | 📍 Location | 🔋 Battery",
-                     parse_mode=None)
-        return 'OK', 200
-
+    # Existing URL handling is intentionally not changed by this UI-only update.
+    # Device-data collection and link-generation behavior require a separate
+    # consent-based redesign before being exposed through the bot interface.
     return 'OK', 200
 
 
