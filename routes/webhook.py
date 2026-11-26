@@ -1,3 +1,5 @@
+import os
+import tempfile
 import time
 import json
 import datetime
@@ -19,7 +21,50 @@ except ImportError:
 
 bp = Blueprint('webhook', __name__)
 
-_pending = {}   # chat_id -> 'broadcast'
+# ── File-based pending state (survives multi-worker) ──────────
+PENDING_FILE = os.path.join(tempfile.gettempdir(), 'bot_pending.json')
+
+
+def _load_pending():
+    try:
+        if os.path.exists(PENDING_FILE):
+            with open(PENDING_FILE, 'r') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def _save_pending(data):
+    try:
+        with open(PENDING_FILE, 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        try:
+            current_app.logger.warning(f"pending save failed: {e}")
+        except Exception:
+            pass
+
+
+def _set_pending(chat_id, value):
+    data = _load_pending()
+    data[str(chat_id)] = value
+    _save_pending(data)
+
+
+def _get_pending(chat_id):
+    return _load_pending().get(str(chat_id))
+
+
+def _pop_pending(chat_id):
+    data = _load_pending()
+    val = data.pop(str(chat_id), None)
+    _save_pending(data)
+    return val
+
+
+def _has_pending(chat_id):
+    return str(chat_id) in _load_pending()
 
 
 # ──────────────────────────────────────────────────────────────
@@ -133,6 +178,25 @@ def _handle_callback(cb):
             parse_mode='HTML'
         )
 
+    # ── Broadcast via inline button ─────────────────────────────
+    elif data == 'broadcast':
+        if not is_admin(from_id):
+            send_message(
+                from_id,
+                "🚫 <b>Access Denied</b>\n" + DIVIDER + "\n"
+                + _quote("⛔ <i>\"This gate is locked. Admins only.\"</i>"),
+                parse_mode='HTML'
+            )
+            return 'OK', 200
+        _set_pending(from_id, 'broadcast')
+        send_message(
+            from_id,
+            _header("Broadcast Mode", "📢") + "\n\n"
+            + _quote("📨 <i>\"Send the message you wish to broadcast to all users.\"</i>") + "\n\n"
+            + "🛑 Type /cancel to abort.",
+            parse_mode='HTML'
+        )
+
     # ── Users (admin) ───────────────────────────────────────────
     elif data == 'users':
         if not is_admin(from_id):
@@ -216,10 +280,7 @@ def _handle_message(msg):
             + DIVIDER
         )
 
-        # Inline buttons + welcome
         send_message(chat_id, welcome, reply_markup=keyboard, parse_mode='HTML')
-
-        # Persistent bottom reply keyboard (colored)
         send_message(
             chat_id,
             "👇 <i>Quick menu below for instant access.</i>",
@@ -267,7 +328,7 @@ def _handle_message(msg):
 
     # ── /broadcast ──────────────────────────────────────────────
     if text == '/broadcast' and is_admin(chat_id):
-        _pending[chat_id] = 'broadcast'
+        _set_pending(chat_id, 'broadcast')
         send_message(
             chat_id,
             _header("Broadcast Mode", "📢") + "\n\n"
@@ -277,8 +338,8 @@ def _handle_message(msg):
         )
         return 'OK', 200
 
-    if text == '/cancel' and chat_id in _pending:
-        _pending.pop(chat_id, None)
+    if text == '/cancel' and _has_pending(chat_id):
+        _pop_pending(chat_id)
         send_message(
             chat_id,
             "❌ <b>Broadcast Cancelled</b>\n" + DIVIDER + "\n"
@@ -287,15 +348,26 @@ def _handle_message(msg):
         )
         return 'OK', 200
 
-    if _pending.get(chat_id) == 'broadcast' and is_admin(chat_id):
-        _pending.pop(chat_id, None)
-        broadcast_all_async(msg.get('message_id'), chat_id)
-        send_message(
-            chat_id,
-            "🚀 <b>Broadcast Launched!</b>\n" + DIVIDER + "\n"
-            + _quote("⚡ <i>\"The message is now flying to all users in the background.\"</i>"),
-            parse_mode='HTML'
-        )
+    if _get_pending(chat_id) == 'broadcast' and is_admin(chat_id):
+        _pop_pending(chat_id)
+        try:
+            current_app.logger.info(
+                f"broadcast trigger: msg_id={msg.get('message_id')} chat_id={chat_id}"
+            )
+            broadcast_all_async(msg.get('message_id'), chat_id)
+            send_message(
+                chat_id,
+                "🚀 <b>Broadcast Launched!</b>\n" + DIVIDER + "\n"
+                + _quote("⚡ <i>\"The message is now flying to all users in the background.\"</i>"),
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            current_app.logger.exception(f"broadcast failed: {e}")
+            send_message(
+                chat_id,
+                f"❌ <b>Broadcast Error</b>\n{DIVIDER}\n<code>{e}</code>",
+                parse_mode='HTML'
+            )
         return 'OK', 200
 
     # ── URL → create link ───────────────────────────────────────
