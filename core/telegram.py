@@ -50,17 +50,20 @@ def send_photo(chat_id, photo_path, caption):
         current_app.logger.warning(f"sendPhoto exception: {e}")
         return False
 
-# core/telegram.py me add karo
+
+# ── FIXED: uses _api() instead of undefined API_URL ───────────
 def send_chat_action(chat_id, action='typing'):
-    import requests
+    """Show 'typing…' / 'upload_photo' etc. in the chat. Safe no-op on error."""
     try:
-        requests.post(
-            f"{API_URL}/sendChatAction",
-            json={'chat_id': chat_id, 'action': action},
+        r = requests.post(
+            _api('sendChatAction'),
+            data={'chat_id': chat_id, 'action': action},
             timeout=5
         )
-    except Exception:
-        pass
+        return r.status_code == 200
+    except Exception as e:
+        current_app.logger.warning(f"sendChatAction exception: {e}")
+        return False
 
 
 def send_location(chat_id, lat, lng):
