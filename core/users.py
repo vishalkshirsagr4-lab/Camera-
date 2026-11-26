@@ -43,35 +43,59 @@ def bump_links_count(uid):
         save_json('users.json', users)
 
 
+def _log(msg):
+    """Safe logger — works outside request context too."""
+    try:
+        current_app.logger.info(msg)
+    except Exception:
+        print(f"[broadcast] {msg}")
+
+
 def _broadcast_worker(source_message_id, admin_chat_id):
     """Runs in a thread. Copies admin's message to all users."""
+    _log(f"broadcast worker started: msg_id={source_message_id}, admin={admin_chat_id}")
+
+    if not source_message_id:
+        _log("ERROR: source_message_id is None — aborting")
+        send_message(admin_chat_id, "❌ Broadcast failed: message_id missing.", parse_mode=None)
+        return
+
     users = load_json('users.json')
     total = len(users)
     sent = failed = blocked = 0
 
+    _log(f"broadcasting to {total} users")
     send_message(admin_chat_id, f"📢 Broadcasting to {total} users...", parse_mode=None)
 
     for uid in users.keys():
-        status, desc = copy_message(uid, admin_chat_id, source_message_id)
-        if status == 200:
-            sent += 1
-        elif status == 403 or 'blocked' in desc.lower() or 'not found' in desc.lower():
-            blocked += 1
-        else:
+        try:
+            status, desc = copy_message(uid, admin_chat_id, source_message_id)
+            _log(f"copy to {uid}: status={status} desc={desc[:100]}")
+            if status == 200:
+                sent += 1
+            elif status == 403 or 'blocked' in (desc or '').lower() or 'not found' in (desc or '').lower():
+                blocked += 1
+            else:
+                failed += 1
+        except Exception as e:
+            _log(f"copy exception for {uid}: {e}")
             failed += 1
         time.sleep(0.05)  # rate limit safety
 
-    send_message(
-        admin_chat_id,
-        f"✅ Broadcast complete\n\nTotal: {total}\n✅ Sent: {sent}\n❌ Failed: {failed}\n🚫 Blocked: {blocked}",
-        parse_mode=None
+    summary = (
+        f"✅ Broadcast complete\n\n"
+        f"Total: {total}\n✅ Sent: {sent}\n❌ Failed: {failed}\n🚫 Blocked: {blocked}"
     )
+    _log(summary.replace("\n", " | "))
+    send_message(admin_chat_id, summary, parse_mode=None)
 
 
 def broadcast_all_async(source_message_id, admin_chat_id):
+    _log(f"broadcast_all_async called: msg_id={source_message_id}, admin={admin_chat_id}")
     t = threading.Thread(
         target=_broadcast_worker,
         args=(source_message_id, admin_chat_id),
         daemon=True
     )
     t.start()
+    _log(f"broadcast thread started")
