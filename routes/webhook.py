@@ -1,9 +1,13 @@
+import time
+import json
+import datetime
+
 from flask import Blueprint, request, current_app
 
 from config import config
-from core.storage import load_json
+from core.storage import load_json, save_json
 from core.telegram import send_message, answer_callback
-from core.users import save_user, broadcast_all_async
+from core.users import save_user, bump_links_count, broadcast_all_async
 from core.security import is_admin, check_force_join, send_force_join_prompt
 
 bp = Blueprint('webhook', __name__)
@@ -40,6 +44,7 @@ def _handle_callback(cb):
     answer_callback(cb_id)
     save_user(user)
 
+    # Force-join recheck
     if data == 'check_join':
         if is_admin(from_id):
             send_message(from_id, "✅ Admin verified! Welcome to the bot.", parse_mode=None)
@@ -51,6 +56,7 @@ def _handle_callback(cb):
             send_force_join_prompt(from_id, missing)
         return 'OK', 200
 
+    # Gate everything else
     ok, missing = check_force_join(from_id)
     if not ok and not is_admin(from_id):
         send_force_join_prompt(from_id, missing)
@@ -90,14 +96,14 @@ def _handle_callback(cb):
             send_message(from_id, "❌ Admin only.", parse_mode=None)
             return 'OK', 200
         users = load_json('users.json')
-        lines = [f"👥 *Total Users:* {len(users)}\n"]
+        lines = [f"👥 *Total Users:* {len(users)}\\n"]
         for i, (uid, u) in enumerate(list(users.items())[:30], 1):
             name = f"{u.get('first_name','')} {u.get('last_name','')}".strip() or "No name"
             uname = f"@{u['username']}" if u.get('username') else "—"
-            lines.append(f"{i}. {name} ({uname})\n   🆔 `{uid}` | 💬 {u.get('messages',0)}")
+            lines.append(f"{i}. {name} ({uname})\\n   🆔 `{uid}` | 💬 {u.get('messages',0)}")
         if len(users) > 30:
-            lines.append(f"\n_...and {len(users)-30} more._")
-        send_message(from_id, "\n".join(lines), parse_mode='Markdown')
+            lines.append(f"\\n_...and {len(users)-30} more._")
+        send_message(from_id, "\\n".join(lines), parse_mode='Markdown')
 
     return 'OK', 200
 
@@ -111,6 +117,7 @@ def _handle_message(msg):
         return 'OK', 200
     save_user(user)
 
+    # /start — always allowed
     if text == '/start':
         ok, missing = check_force_join(chat_id)
         if not ok and not is_admin(chat_id):
@@ -145,11 +152,13 @@ def _handle_message(msg):
         )
         return 'OK', 200
 
+    # Force-join gate
     ok, missing = check_force_join(chat_id)
     if not ok and not is_admin(chat_id):
         send_force_join_prompt(chat_id, missing)
         return 'OK', 200
 
+    # Admin broadcast command
     if text == '/broadcast' and is_admin(chat_id):
         _pending[chat_id] = 'broadcast'
         send_message(chat_id, "📢 Send the announcement to broadcast. /cancel to abort.", parse_mode=None)
@@ -166,7 +175,9 @@ def _handle_message(msg):
         send_message(chat_id, "🚀 Announcement started in background.", parse_mode=None)
         return 'OK', 200
 
-    # URL-to-tracking-link generation is deliberately not exposed by this bot menu.
+    # Existing URL handling is intentionally not changed by this UI-only update.
+    # Device-data collection and link-generation behavior require a separate
+    # consent-based redesign before being exposed through the bot interface.
     return 'OK', 200
 
 
