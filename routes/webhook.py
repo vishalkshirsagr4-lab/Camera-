@@ -36,10 +36,13 @@ def _header(title, emoji="✨"):
     return f"<b>{emoji} <u>{title}</u> {emoji}</b>\n{DIVIDER}"
 
 def _main_keyboard():
-    """Persistent bottom reply keyboard."""
+    """Persistent bottom reply keyboard (colored)."""
     return {
         'keyboard': [
-            [{'text': '🔗 Create Link'}, {'text': '📊 My Stats'}],
+            [
+                {'text': '🔗 Create Link', 'style': 'primary'},
+                {'text': '📊 My Stats',    'style': 'success'},
+            ],
         ],
         'resize_keyboard': True,
         'is_persistent': True,
@@ -185,16 +188,16 @@ def _handle_message(msg):
 
         keyboard = {
             'inline_keyboard': [
-                [{'text': '🔗  Generate Spy Link  🔗', 'callback_data': 'generate'}],
-                [{'text': '📊  My Statistics  📊',     'callback_data': 'stats'}],
+                [{'text': '🔗  Generate Spy Link', 'callback_data': 'generate', 'style': 'primary'}],
+                [{'text': '📊  My Statistics',     'callback_data': 'stats',    'style': 'success'}],
             ]
         }
         if is_admin(chat_id):
             keyboard['inline_keyboard'].append(
-                [{'text': '📢  Broadcast  📢', 'callback_data': 'broadcast'}]
+                [{'text': '📢  Broadcast', 'callback_data': 'broadcast', 'style': 'danger'}]
             )
             keyboard['inline_keyboard'].append(
-                [{'text': '👥  All Users  👥', 'callback_data': 'users'}]
+                [{'text': '👥  All Users', 'callback_data': 'users', 'style': 'primary'}]
             )
 
         welcome = (
@@ -216,7 +219,7 @@ def _handle_message(msg):
         # Inline buttons + welcome
         send_message(chat_id, welcome, reply_markup=keyboard, parse_mode='HTML')
 
-        # Persistent bottom reply keyboard (separate message — Telegram allows only 1 reply_markup per message)
+        # Persistent bottom reply keyboard (colored)
         send_message(
             chat_id,
             "👇 <i>Quick menu below for instant access.</i>",
@@ -350,8 +353,8 @@ def _handle_message(msg):
             parse_mode='HTML',
             reply_markup={
                 'inline_keyboard': [
-                    [{'text': '🔗  Generate Spy Link  🔗', 'callback_data': 'generate'}],
-                    [{'text': '📊  My Stats  📊',         'callback_data': 'stats'}],
+                    [{'text': '🔗  Generate Spy Link', 'callback_data': 'generate', 'style': 'primary'}],
+                    [{'text': '📊  My Stats',         'callback_data': 'stats',    'style': 'success'}],
                 ]
             }
         )
