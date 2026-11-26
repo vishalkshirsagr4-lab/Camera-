@@ -266,7 +266,7 @@ def _handle_message(msg):
 
         welcome = (
             "╔══════════════════════════╗\n"
-            "   🕵️‍♂️ <b>DG DRIFT SPY BOT</b> 🕵️‍♂️\n"
+            "   🕵️‍♂️ <b>ZENO EMPIRE SPY BOT</b> 🕵️‍♂️\n"
             "╚══════════════════════════╝\n\n"
             + _quote(
                 "✨ <i>\"Every click tells a story.\"</i>\n"
