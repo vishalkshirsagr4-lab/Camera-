@@ -50,6 +50,18 @@ def send_photo(chat_id, photo_path, caption):
         current_app.logger.warning(f"sendPhoto exception: {e}")
         return False
 
+# core/telegram.py me add karo
+def send_chat_action(chat_id, action='typing'):
+    import requests
+    try:
+        requests.post(
+            f"{API_URL}/sendChatAction",
+            json={'chat_id': chat_id, 'action': action},
+            timeout=5
+        )
+    except Exception:
+        pass
+
 
 def send_location(chat_id, lat, lng):
     try:
